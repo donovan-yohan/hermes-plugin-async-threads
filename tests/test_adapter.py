@@ -75,18 +75,19 @@ def _fields(handle, event_id="evt1"):
     }
 
 
-def _event_body(handle, event_id="evt1"):
-    return json.dumps(
-        {
-            "version": "async-thread-event/v1",
-            "eventId": event_id,
-            "eventType": "relay.session.pr_opened",
-            "producer": {"id": handle.producer_id},
-            "occurredAt": time.time(),
-            "asyncThread": {"threadKey": handle.thread_key},
-            "summary": "PR opened",
-        }
-    ).encode()
+def _event_body(handle, event_id="evt1", event_type="relay.session.pr_opened", summary="PR opened", payload=None):
+    body = {
+        "version": "async-thread-event/v1",
+        "eventId": event_id,
+        "eventType": event_type,
+        "producer": {"id": handle.producer_id},
+        "occurredAt": time.time(),
+        "asyncThread": {"threadKey": handle.thread_key},
+        "summary": summary,
+    }
+    if payload is not None:
+        body["payload"] = payload
+    return json.dumps(body).encode()
 
 
 def test_render_event_message_redacts_hostile_payload_before_prompt_text():
@@ -132,6 +133,18 @@ def test_render_event_message_redacts_hostile_payload_before_prompt_text():
         assert sentinel not in text
     assert "<redacted>" in text
     assert "ok" in text
+
+
+def test_render_event_message_redacts_token_query_params_in_urls():
+    text = render_event_message(
+        {"payload": {"comment_url": "https://example.test/c?access_token=url-token&safe=1"}},
+        event_type="relay.lane.progress",
+        producer_id="relay-ath-dev",
+        summary="url test",
+    )
+
+    assert "url-token" not in text
+    assert "access_token=<redacted>" in text
 
 
 def test_finished_event_defaults_to_compact_tail_without_raw_transcript():
@@ -479,6 +492,157 @@ async def test_direct_policy_does_not_send_ack_even_if_handle_has_ack_mode(tmp_p
     assert "ack_sent" not in detail
     assert len(target.sent) == 1
     assert "async-thread event received" not in target.sent[0][1]
+
+
+@pytest.mark.asyncio
+async def test_coalesces_routine_started_progress_events_into_one_digest(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", debounce_seconds=30)
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+
+    first = await adapter._handle_event(
+        FakeRequest(
+            _event_body(handle, "evt_start_1", "relay.lane.started", "lane a started", {"lane": "lane-a"}),
+            handle.secret,
+        )
+    )
+    second = await adapter._handle_event(
+        FakeRequest(
+            _event_body(handle, "evt_progress_1", "relay.lane.progress", "lane b progress", {"lane": "lane-b"}),
+            handle.secret,
+        )
+    )
+
+    assert [first.status, second.status] == [202, 202]
+    assert target.handled == []
+    assert json.loads(first.text)["status"] == "queued"
+    await adapter._flush_coalesced(handle.thread_key, reason="test_flush")
+
+    assert len(target.handled) == 1
+    text = target.handled[0].text
+    assert "async_threads.coalesced" in text
+    assert "2 async-thread routine events coalesced" in text
+    assert "lane-a" in text
+    assert "lane-b" in text
+    events = registry.list_recent_events(thread_key=handle.thread_key, limit=10)
+    assert [event.outcome for event in events[:3]] == ["agent_started", "coalesced_pending", "coalesced_pending"]
+    assert events[0].detail["coalesced_count"] == 2
+    assert events[0].detail["coalesced_reason"] == "test_flush"
+
+    duplicate = await adapter._handle_event(
+        FakeRequest(
+            _event_body(handle, "evt_start_1", "relay.lane.started", "lane a started", {"lane": "lane-a"}),
+            handle.secret,
+        )
+    )
+    assert json.loads(duplicate.text)["status"] == "duplicate"
+    assert len(target.handled) == 1
+
+
+@pytest.mark.asyncio
+async def test_priority_failure_bypasses_debounce_and_flushes_pending_digest(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", debounce_seconds=30)
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+
+    pending = await adapter._handle_event(
+        FakeRequest(
+            _event_body(handle, "evt_progress_pending", "relay.lane.progress", "lane a progress", {"lane": "lane-a"}),
+            handle.secret,
+        )
+    )
+    failed = await adapter._handle_event(
+        FakeRequest(
+            _event_body(
+                handle,
+                "evt_failed",
+                "relay.lane.failed",
+                "lane b failed",
+                {"lane": "lane-b", "status": "failed", "log_path": "/tmp/lane-b.log"},
+            ),
+            handle.secret,
+        )
+    )
+
+    assert [pending.status, failed.status] == [202, 202]
+    assert len(target.handled) == 2
+    digest_text = target.handled[0].text
+    failure_text = target.handled[1].text
+    assert "lane-a" in digest_text
+    assert "priority_flush" in digest_text
+    assert "lane-b" in failure_text
+    assert "relay.lane.failed" in failure_text
+    await adapter._flush_coalesced(handle.thread_key, reason="should_be_empty")
+    assert len(target.handled) == 2
+    events = registry.list_recent_events(thread_key=handle.thread_key, limit=3)
+    assert events[0].event_type == "relay.lane.failed"
+    assert events[0].outcome == "agent_started"
+    assert events[1].event_type == "async_threads.coalesced"
+    assert events[1].detail["coalesced_count"] == 1
+    assert events[1].detail["coalesced_reason"] == "priority_flush"
+
+
+@pytest.mark.asyncio
+async def test_successful_terminal_finish_flushes_pending_before_finish(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", debounce_seconds=30)
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+
+    pending = await adapter._handle_event(
+        FakeRequest(
+            _event_body(handle, "evt_progress_before_finish", "relay.lane.progress", "lane progress", {"lane": "lane-a"}),
+            handle.secret,
+        )
+    )
+    finished = await adapter._handle_event(
+        FakeRequest(
+            _event_body(handle, "evt_finished", "relay.lane.finished", "lane finished", {"lane": "lane-a", "verdict": "passed"}),
+            handle.secret,
+        )
+    )
+
+    assert [pending.status, finished.status] == [202, 202]
+    assert len(target.handled) == 2
+    assert "async_threads.coalesced" in target.handled[0].text
+    assert "relay.lane.finished" in target.handled[1].text
+    await adapter._flush_coalesced(handle.thread_key, reason="should_be_empty")
+    assert len(target.handled) == 2
+
+
+@pytest.mark.asyncio
+async def test_priority_failure_dispatch_failure_keeps_original_ids_retryable(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", debounce_seconds=30)
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: FakeTargetAdapter(fail_handle=True)})
+    progress_body = _event_body(handle, "evt_progress_retry", "relay.lane.progress", "lane progress", {"lane": "lane-a"})
+    failed_body = _event_body(handle, "evt_failed_retry", "relay.lane.failed", "lane failed", {"lane": "lane-b", "status": "failed"})
+
+    pending = await adapter._handle_event(FakeRequest(progress_body, handle.secret))
+    failed = await adapter._handle_event(FakeRequest(failed_body, handle.secret))
+
+    assert pending.status == 202
+    assert failed.status == 502
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: FakeTargetAdapter()})
+    retry_failed = await adapter._handle_event(FakeRequest(failed_body, handle.secret))
+    assert retry_failed.status == 202
+    retry_progress = await adapter._handle_event(FakeRequest(progress_body, handle.secret))
+    assert json.loads(retry_progress.text)["status"] == "queued"
+    await adapter._flush_coalesced(handle.thread_key, reason="cleanup")
 
 
 @pytest.mark.asyncio

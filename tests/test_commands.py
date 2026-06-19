@@ -39,7 +39,7 @@ def test_listen_captures_current_source_and_returns_secret(tmp_path):
     event = SimpleNamespace(source=source)
 
     response = _run_command(
-        "listen relay --events relay.session.pr_opened --label chunk --ack brief",
+        "listen relay --events relay.session.pr_opened --label chunk --ack brief --debounce 45",
         event=event,
         gateway=gateway,
     )
@@ -49,8 +49,10 @@ def test_listen_captures_current_source_and_returns_secret(tmp_path):
     assert "secret:" in response
     assert "relay.session.pr_opened" in response
     assert "ack: `brief`" in response
+    assert "debounce: `45s`" in response
     [handle] = AsyncThreadRegistry(registry_path).list_handles(owner_user_id="u")
     assert handle.ack_mode == "brief"
+    assert handle.debounce_seconds == 45
 
     direct_response = _run_command(
         "listen relay --policy direct --ack debug",
@@ -59,6 +61,14 @@ def test_listen_captures_current_source_and_returns_secret(tmp_path):
     )
     assert "policy: `direct`" in direct_response
     assert "ack: `none`" in direct_response
+    assert "debounce: `0s`" in direct_response
+
+    bad_response = _run_command(
+        "listen relay --debounce 999",
+        event=event,
+        gateway=gateway,
+    )
+    assert bad_response == "invalid debounce seconds. use 0-300."
 
 
 def test_help_for_unknown_command():
@@ -89,6 +99,7 @@ def test_listener_management_commands_are_owner_scoped(tmp_path):
         producer_id="relay",
         owner_user_id="u1",
         session_key="agent:secret-session-key",
+        debounce_seconds=30,
     )
     other = registry.create_handle(
         source={"platform": "discord", "chat_id": "c2", "chat_type": "channel", "thread_id": "t2"},
@@ -98,12 +109,14 @@ def test_listener_management_commands_are_owner_scoped(tmp_path):
 
     listing = _cmd_list(registry, owner_user_id="u1")
     assert mine.thread_key in listing
+    assert "debounce=30s" in listing
     assert other.thread_key not in listing
 
     assert _cmd_list(registry, owner_user_id="") == "no async-thread listeners for this user. create one with `/ath listen <producer>`."
     inspected_mine = _cmd_inspect(registry, mine.thread_key, owner_user_id="u1")
     assert "producer: `relay`" in inspected_mine
     assert "sessionKey: present hash=`" in inspected_mine
+    assert "debounce: `30s`" in inspected_mine
     assert "agent:secret-session-key" not in inspected_mine
     assert _cmd_inspect(registry, other.thread_key, owner_user_id="u1") == "async-thread listener not found."
     assert _cmd_set_enabled(registry, other.thread_key, False, "paused", owner_user_id="u1") == "async-thread listener not found."

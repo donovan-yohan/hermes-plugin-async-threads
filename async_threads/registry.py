@@ -17,12 +17,15 @@ from typing import Any, Iterable
 from .privacy import redact_metadata_text, redact_secret_text, safe_event_id
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SAFE_DETAIL_KEYS = {
     "ack_mode",
     "ack_sent",
     "ack_success",
+    "coalesced_count",
+    "coalesced_reason",
+    "debounce_seconds",
     "ack_error",
     "active_session",
     "direct_send_success",
@@ -64,6 +67,7 @@ class AsyncThreadHandle:
     session_id: str = ""
     owner_user_id: str = ""
     ack_mode: str = "none"
+    debounce_seconds: int = 0
     created_at: str = ""
     updated_at: str = ""
 
@@ -141,7 +145,8 @@ class AsyncThreadRegistry:
                     secret text not null,
                     allowed_event_types_json text not null default '[]',
                     policy text not null default 'agent_queue',
-                    ack_mode text not null default 'none'
+                    ack_mode text not null default 'none',
+                    debounce_seconds integer not null default 0
                 );
 
                 create index if not exists idx_async_thread_handles_owner
@@ -199,6 +204,8 @@ class AsyncThreadRegistry:
         }
         if "ack_mode" not in handle_columns:
             conn.execute("alter table async_thread_handles add column ack_mode text not null default 'none'")
+        if "debounce_seconds" not in handle_columns:
+            conn.execute("alter table async_thread_handles add column debounce_seconds integer not null default 0")
 
     def create_handle(
         self,
@@ -212,10 +219,12 @@ class AsyncThreadRegistry:
         session_id: str = "",
         owner_user_id: str = "",
         ack_mode: str = "none",
+        debounce_seconds: int = 0,
     ) -> AsyncThreadHandle:
         producer_id = _clean_token(producer_id, default="default")
         policy = policy if policy in {"agent_queue", "direct"} else "agent_queue"
         ack_mode = ack_mode if ack_mode in {"none", "brief", "debug"} else "none"
+        debounce_seconds = max(0, min(int(debounce_seconds or 0), 300))
         thread_key = f"ath_{secrets.token_urlsafe(12).replace('-', '').replace('_', '')[:16]}"
         secret = secrets.token_urlsafe(32)
         now = utc_now()
@@ -226,8 +235,8 @@ class AsyncThreadRegistry:
                 insert into async_thread_handles(
                     thread_key, created_at, updated_at, enabled, label, source_json,
                     session_key, session_id, owner_user_id, producer_id, secret,
-                    allowed_event_types_json, policy, ack_mode
-                ) values (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    allowed_event_types_json, policy, ack_mode, debounce_seconds
+                ) values (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     thread_key,
@@ -243,6 +252,7 @@ class AsyncThreadRegistry:
                     json.dumps(list(event_types)),
                     policy,
                     ack_mode,
+                    debounce_seconds,
                 ),
             )
         return self.get_handle(thread_key)  # type: ignore[return-value]
@@ -397,6 +407,7 @@ def _row_to_handle(row: sqlite3.Row) -> AsyncThreadHandle:
         session_id=row["session_id"],
         owner_user_id=row["owner_user_id"],
         ack_mode=row["ack_mode"] or "none",
+        debounce_seconds=int(row["debounce_seconds"] or 0),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

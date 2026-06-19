@@ -12,7 +12,7 @@ from .registry import safe_session_key_hash
 
 USAGE = """async threads (/ath)
 commands:
-  /ath listen <producer> [--events a,b] [--label text] [--policy agent_queue|direct] [--ack none|brief|debug]
+  /ath listen <producer> [--events a,b] [--label text] [--policy agent_queue|direct] [--ack none|brief|debug] [--debounce seconds]
   /ath status
   /ath list
   /ath events [thread_key] [--limit N]
@@ -87,12 +87,13 @@ def _run_command(raw_args: str, *, event: Any, gateway: Any) -> str:
 
 def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> str:
     if not args:
-        return "usage: /ath listen <producer> [--events a,b] [--label text] [--policy agent_queue|direct] [--ack none|brief|debug]"
+        return "usage: /ath listen <producer> [--events a,b] [--label text] [--policy agent_queue|direct] [--ack none|brief|debug] [--debounce seconds]"
     producer_id = args[0]
     events: list[str] = []
     label = ""
     policy = "agent_queue"
     ack_mode = "none"
+    debounce_seconds = 0
     i = 1
     while i < len(args):
         arg = args[i]
@@ -112,12 +113,23 @@ def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> 
             ack_mode = args[i + 1]
             i += 2
             continue
+        if arg == "--debounce" and i + 1 < len(args):
+            try:
+                debounce_seconds = int(args[i + 1])
+            except ValueError:
+                return "invalid debounce seconds. use 0-300."
+            i += 2
+            continue
         return f"unknown option for /ath listen: {arg}"
 
     if ack_mode not in {"none", "brief", "debug"}:
         return "invalid ack mode. use one of: none, brief, debug."
     if policy == "direct" and ack_mode != "none":
         ack_mode = "none"
+    if debounce_seconds < 0 or debounce_seconds > 300:
+        return "invalid debounce seconds. use 0-300."
+    if policy == "direct":
+        debounce_seconds = 0
 
     source = event.source
     source_dict = source.to_dict() if hasattr(source, "to_dict") else dict(source)
@@ -133,6 +145,7 @@ def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> 
         session_id=session_id,
         owner_user_id=str(getattr(source, "user_id", "") or ""),
         ack_mode=ack_mode,
+        debounce_seconds=debounce_seconds,
     )
     url = _event_url(gateway)
     events_text = ", ".join(handle.allowed_event_types) if handle.allowed_event_types else "all events"
@@ -142,6 +155,7 @@ def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> 
         f"producer: `{handle.producer_id}`\n"
         f"policy: `{handle.policy}`\n"
         f"ack: `{handle.ack_mode}`\n"
+        f"debounce: `{handle.debounce_seconds}s`\n"
         f"events: {events_text}\n"
         f"url: `{url}`\n"
         f"secret: `{handle.secret}`\n"
@@ -234,6 +248,9 @@ def _format_event_detail(detail: dict[str, Any]) -> str:
         "ack_sent",
         "ack_success",
         "ack_error",
+        "coalesced_count",
+        "coalesced_reason",
+        "debounce_seconds",
         "session_key_present",
         "session_key_hash",
         "active_session",
@@ -289,7 +306,8 @@ def _cmd_list(registry: Any, *, owner_user_id: str) -> str:
         state = "enabled" if h.enabled else "disabled"
         label = f" — {h.label}" if h.label else ""
         thread = f" thread={h.thread_id}" if h.thread_id else ""
-        lines.append(f"- `{h.thread_key}` {state} producer=`{h.producer_id}` policy=`{h.policy}`{thread}{label}")
+        debounce = f" debounce={h.debounce_seconds}s" if h.debounce_seconds else ""
+        lines.append(f"- `{h.thread_key}` {state} producer=`{h.producer_id}` policy=`{h.policy}`{debounce}{thread}{label}")
     return "\n".join(lines)
 
 
@@ -308,6 +326,7 @@ def _cmd_inspect(registry: Any, thread_key: str, *, owner_user_id: str) -> str:
         f"producer: `{h.producer_id}`\n"
         f"policy: `{h.policy}`\n"
         f"ack: `{h.ack_mode}`\n"
+        f"debounce: `{h.debounce_seconds}s`\n"
         f"events: {events}\n"
         f"platform/chat/thread: `{h.platform}` / `{h.chat_id}` / `{h.thread_id or '-'}`\n"
         f"sessionKey: {session_key_state} hash=`{session_key_hash}`\n"
