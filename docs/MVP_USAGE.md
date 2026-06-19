@@ -42,6 +42,16 @@ In the thread/channel to wake later:
 /ath listen relay --events relay.session.pr_opened,relay.session.needs_attention --label "relay dogfood"
 ```
 
+Acknowledgements are opt-in for `agent_queue` listeners:
+
+```text
+/ath listen relay --events relay.session.pr_opened --ack none   # default, silent
+/ath listen relay --events relay.session.pr_opened --ack brief  # one compact visible notice
+/ath listen relay --events relay.session.pr_opened --ack debug  # safe diagnostic notice
+```
+
+`--ack` is ignored for `--policy direct`; direct delivery is already visible when it succeeds.
+
 The command replies with:
 
 - `threadKey`
@@ -64,7 +74,7 @@ Management and diagnostics commands:
 
 The registry schema stores optional `event_log.detail_json` for structured diagnostics. Details are allowlisted and sanitized before persistence; unsafe keys such as `secret`, `token`, `authorization`, `cookie`, `signature`, `payload`, `body`, `raw`, and credential-like fields are omitted or redacted.
 
-Dispatch diagnostics currently include only privacy-safe operator metadata: target platform, gateway-runner/target-adapter presence, policy, whether a session key was present, a short hash of the resolved session key, active-session/queue state, whether `handle_message` was called/returned, direct-send success, and sanitized exception class/message. These fields say what the plugin knows about initial dispatch; they do not prove final user-visible delivery.
+Dispatch diagnostics currently include only privacy-safe operator metadata: target platform, gateway-runner/target-adapter presence, policy, acknowledgement mode/success/failure, whether a session key was present, a short hash of the resolved session key, active-session/queue state, whether `handle_message` was called/returned, direct-send success, and sanitized exception class/message. These fields say what the plugin knows about initial dispatch; they do not prove final user-visible delivery.
 
 Current operator-facing outcomes:
 

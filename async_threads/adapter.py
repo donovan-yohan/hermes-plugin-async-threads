@@ -69,6 +69,39 @@ def _producer_status(outcome: str) -> str:
     }.get(outcome, outcome)
 
 
+def _ack_notice_text(
+    *,
+    ack_mode: str,
+    producer_id: str,
+    event_type: str,
+    event_id: str,
+    thread_key: str,
+    outcome: str,
+) -> str:
+    producer = _safe_ack_token(producer_id)
+    event = _safe_ack_token(event_type)
+    if ack_mode == "debug":
+        return (
+            "async-thread event received\n"
+            f"producer: `{producer}`\n"
+            f"eventType: `{event}`\n"
+            f"eventId: `{_short_ack_id(event_id)}`\n"
+            f"threadKey: `{_safe_ack_token(thread_key)}`\n"
+            f"initialOutcome: `{_safe_ack_token(outcome)}`"
+        )
+    return f"received {event} from {producer}; starting continuation…"
+
+
+def _safe_ack_token(value: str) -> str:
+    text = "".join(ch for ch in str(value or "") if ch.isalnum() or ch in {"-", "_", ".", ":"})
+    return text[:100] or "-"
+
+
+def _short_ack_id(event_id: str) -> str:
+    text = _safe_ack_token(event_id)
+    return f"…{text[-8:]}" if len(text) > 8 else text
+
+
 class AsyncThreadsAdapter:  # subclassed dynamically to keep imports test-friendly
     pass
 
@@ -314,6 +347,15 @@ def _build_adapter_base():
             detail["queued"] = False
             detail["handle_message_called"] = False
             detail["handle_message_returned"] = False
+            initial_outcome = "queued_active_session" if active_session else "agent_started"
+            await self._send_ack_notice(
+                target_adapter=target_adapter,
+                source=source,
+                handle=handle,
+                fields=fields,
+                outcome=initial_outcome,
+                detail=detail,
+            )
             if active_session:
                 merge_pending_message_event(
                     target_adapter._pending_messages,
@@ -330,6 +372,41 @@ def _build_adapter_base():
                 raise DispatchEventError(str(exc), detail=detail) from exc
             detail["handle_message_returned"] = True
             return "agent_started", detail
+
+        async def _send_ack_notice(
+            self,
+            *,
+            target_adapter: Any,
+            source: Any,
+            handle: AsyncThreadHandle,
+            fields: Mapping[str, str],
+            outcome: str,
+            detail: dict[str, Any],
+        ) -> None:
+            ack_mode = handle.ack_mode if handle.ack_mode in {"brief", "debug"} else "none"
+            detail["ack_mode"] = ack_mode
+            if ack_mode == "none":
+                detail["ack_sent"] = False
+                return
+            content = _ack_notice_text(
+                ack_mode=ack_mode,
+                producer_id=fields["producer_id"],
+                event_type=fields["event_type"],
+                event_id=fields["event_id"],
+                thread_key=handle.thread_key,
+                outcome=outcome,
+            )
+            metadata = {"thread_id": source.thread_id} if source.thread_id else None
+            detail["ack_sent"] = True
+            try:
+                result = await target_adapter.send(source.chat_id, content, metadata=metadata)
+            except Exception as exc:  # noqa: BLE001 - ack must not block continuation
+                detail["ack_success"] = False
+                detail["ack_error"] = str(exc)
+                return
+            detail["ack_success"] = bool(getattr(result, "success", False))
+            if not detail["ack_success"]:
+                detail["ack_error"] = str(getattr(result, "error", None) or "ack send failed")
 
     return _AsyncThreadsAdapter
 

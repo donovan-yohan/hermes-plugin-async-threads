@@ -39,7 +39,7 @@ def test_listen_captures_current_source_and_returns_secret(tmp_path):
     event = SimpleNamespace(source=source)
 
     response = _run_command(
-        "listen relay --events relay.session.pr_opened --label chunk",
+        "listen relay --events relay.session.pr_opened --label chunk --ack brief",
         event=event,
         gateway=gateway,
     )
@@ -48,6 +48,17 @@ def test_listen_captures_current_source_and_returns_secret(tmp_path):
     assert "threadKey:" in response
     assert "secret:" in response
     assert "relay.session.pr_opened" in response
+    assert "ack: `brief`" in response
+    [handle] = AsyncThreadRegistry(registry_path).list_handles(owner_user_id="u")
+    assert handle.ack_mode == "brief"
+
+    direct_response = _run_command(
+        "listen relay --policy direct --ack debug",
+        event=event,
+        gateway=gateway,
+    )
+    assert "policy: `direct`" in direct_response
+    assert "ack: `none`" in direct_response
 
 
 def test_help_for_unknown_command():
@@ -130,6 +141,9 @@ def test_status_events_and_inspect_show_owner_scoped_diagnostics(tmp_path):
             "gateway_runner_exists": True,
             "target_adapter_exists": True,
             "policy": "agent_queue",
+            "ack_mode": "debug",
+            "ack_sent": True,
+            "ack_success": True,
             "session_key_present": True,
             "session_key_hash": "abc123def456",
             "active_session": False,
@@ -184,6 +198,9 @@ def test_status_events_and_inspect_show_owner_scoped_diagnostics(tmp_path):
     assert "target_platform=discord" in events
     assert "gateway_runner_exists=True" in events
     assert "target_adapter_exists=True" in events
+    assert "ack_mode=debug" in events
+    assert "ack_sent=True" in events
+    assert "ack_success=True" in events
     assert "session_key_hash=abc123def456" in events
     assert "handle_message_called=True" in events
     assert "not-stored" not in events
