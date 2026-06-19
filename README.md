@@ -49,7 +49,8 @@ MVP implementation includes:
 - idle-session wake and active-session queue behavior;
 - privacy-safe dispatch diagnostics and opt-in `agent_queue` acknowledgements;
 - compact long-running lane event rendering with `tailMode: none | compact | debug` so raw tails are opt-in and capped;
-- optional listener debounce/coalescing for routine same-thread lane updates.
+- optional listener debounce/coalescing for routine same-thread lane updates;
+- a profile-lane producer helper for compact background-lane `started`/`progress`/`finished`/`failed` events.
 
 See [`docs/MVP_USAGE.md`](docs/MVP_USAGE.md) for install/config and test-event shape.
 
