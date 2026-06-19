@@ -1,0 +1,88 @@
+# MVP usage: async-thread listener slice
+
+This repo currently ships a first MVP slice for gateway-local async-thread continuation.
+
+## What works
+
+- `/ath listen <producer>` from an existing Hermes gateway conversation captures the current `SessionSource` as an async-thread handle.
+- `POST /async-threads/v1/events` accepts `async-thread-event/v1` JSON.
+- Events are HMAC-SHA256 authenticated with the per-handle secret.
+- Events are de-duped by `(producerId, eventId)`.
+- Idle target sessions are woken by synthetic internal `MessageEvent` injection into the stored source.
+- Active target sessions are queued into the target adapter's pending-message queue instead of interrupting the running turn.
+- `direct` policy can send a notification without invoking the agent, but the intended dogfood path is `agent_queue`.
+
+## Install/config shape
+
+Install/enable the plugin in the Hermes profile, then enable the platform adapter:
+
+```yaml
+plugins:
+  enabled:
+    - async-threads
+
+platforms:
+  async_threads:
+    enabled: true
+    extra:
+      host: "127.0.0.1"
+      port: 8765
+      # Optional for reverse-proxy/public test setups:
+      # public_url: "https://example.com"
+      # registry_path: "/absolute/path/to/registry.sqlite3"
+```
+
+Restart the gateway after config/plugin changes.
+
+## Discord/gateway command
+
+In the thread/channel to wake later:
+
+```text
+/ath listen relay --events relay.session.pr_opened,relay.session.needs_attention --label "relay dogfood"
+```
+
+The command replies with:
+
+- `threadKey`
+- receiver URL
+- generated HMAC secret, shown once
+
+Management commands:
+
+```text
+/ath list
+/ath inspect <thread_key>
+/ath pause <thread_key>
+/ath resume <thread_key>
+/ath revoke <thread_key>
+```
+
+## Event shape
+
+```json
+{
+  "version": "async-thread-event/v1",
+  "eventId": "evt_001",
+  "eventType": "relay.session.pr_opened",
+  "producer": {"id": "relay"},
+  "occurredAt": "2026-06-18T12:34:56Z",
+  "asyncThread": {"threadKey": "ath_..."},
+  "summary": "Relay session opened a PR and is ready for review.",
+  "subject": {"repo": "donovan-yohan/relay-ide", "pr": 123},
+  "payload": {"safe": "untrusted data only"}
+}
+```
+
+Sign the exact request body:
+
+```text
+X-Hermes-Signature-256: sha256=<hmac_sha256_hex(body, secret)>
+```
+
+## Security notes
+
+- Payload text is rendered under an untrusted-data boundary before entering the agent session.
+- The MVP stores per-handle HMAC secrets in plugin-local SQLite because the receiver needs to validate inbound events.
+- `/ath listen` uses the `pre_gateway_dispatch` hook to capture the current thread source. That hook runs before normal gateway auth, so the implementation explicitly defers to `_is_user_authorized(source)` when available.
+- This is gateway-local: the receiver assumes the target platform adapter is connected in the same gateway process/profile.

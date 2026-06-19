@@ -39,7 +39,16 @@ Hermes receives it, de-dupes it, restores enough origin/session context, runs a 
 
 ## Status
 
-Seed repo. No implementation yet.
+First MVP slice implemented on `feat/async-thread-mvp`:
+
+- plugin-local async-thread registry;
+- `/ath listen/list/inspect/pause/resume/revoke` gateway commands;
+- `async_threads` gateway platform receiver;
+- signed `async-thread-event/v1` HTTP endpoint;
+- de-dupe by producer/event id;
+- idle-session wake and active-session queue behavior.
+
+See [`docs/MVP_USAGE.md`](docs/MVP_USAGE.md) for install/config and test-event shape.
 
 ## License
 
