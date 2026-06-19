@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import re
 import shlex
 from typing import Any
 
-from .adapter import registry_from_config
+from .adapter import registry_from_config, registry_path_from_config
 
 
 USAGE = """async threads (/ath)
 commands:
   /ath listen <producer> [--events a,b] [--label text] [--policy agent_queue|direct]
+  /ath status
   /ath list
+  /ath events [thread_key] [--limit N]
   /ath inspect <thread_key>
   /ath pause <thread_key>
   /ath resume <thread_key>
@@ -63,8 +66,13 @@ def _run_command(raw_args: str, *, event: Any, gateway: Any) -> str:
     if command == "listen":
         return _cmd_listen(argv[1:], event=event, gateway=gateway, registry=registry)
     owner_user_id = str(getattr(event.source, "user_id", "") or "")
+    if command == "status":
+        return _cmd_status(registry, config=config, gateway=gateway, owner_user_id=owner_user_id)
     if command in {"list", "ls"}:
         return _cmd_list(registry, owner_user_id=owner_user_id)
+    if command == "events":
+        thread_key, limit = _parse_events_args(argv[1:])
+        return _cmd_events(registry, thread_key=thread_key, limit=limit, owner_user_id=owner_user_id)
     if command == "inspect" and len(argv) >= 2:
         return _cmd_inspect(registry, argv[1], owner_user_id=owner_user_id)
     if command in {"pause", "disable"} and len(argv) >= 2:
@@ -128,6 +136,99 @@ def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> 
     )
 
 
+def _cmd_status(registry: Any, *, config: Any, gateway: Any, owner_user_id: str) -> str:
+    adapter = _async_threads_adapter(gateway)
+    extra = getattr(config, "extra", {}) or {}
+    host = str(extra.get("host", "127.0.0.1"))
+    port = int(extra.get("port", 8765))
+    running = "yes" if getattr(adapter, "_running", False) else "unknown"
+    listener_count = registry.count_handles(owner_user_id=owner_user_id or "") if owner_user_id else 0
+    event_count = registry.count_recent_events(owner_user_id=owner_user_id or "") if owner_user_id else 0
+    return (
+        "async-thread status\n"
+        f"receiver: `{_event_url(gateway)}` ({host}:{port})\n"
+        f"running: {running}\n"
+        f"registry: `{registry_path_from_config(config)}`\n"
+        f"listeners: {listener_count}\n"
+        f"recent events: {event_count}"
+    )
+
+
+def _cmd_events(registry: Any, *, thread_key: str | None, limit: int, owner_user_id: str) -> str:
+    if not owner_user_id:
+        return "no async-thread events for this user."
+    events = registry.list_recent_events(thread_key=thread_key, owner_user_id=owner_user_id, limit=limit)
+    if not events:
+        suffix = f" for `{thread_key}`" if thread_key else ""
+        return f"no async-thread events{suffix}."
+    lines = ["recent async-thread events:"]
+    for event in events:
+        lines.append(_format_event_row(event))
+    return "\n".join(lines)
+
+
+def _parse_events_args(args: list[str]) -> tuple[str | None, int]:
+    thread_key: str | None = None
+    limit = 20
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--limit" and i + 1 < len(args):
+            try:
+                limit = int(args[i + 1])
+            except ValueError:
+                limit = 20
+            i += 2
+            continue
+        if not arg.startswith("--") and thread_key is None:
+            thread_key = arg
+            i += 1
+            continue
+        i += 1
+    return thread_key, max(1, min(limit, 50))
+
+
+def _format_event_row(event: Any) -> str:
+    summary = _diagnostic_summary(event)
+    summary_text = f" — {summary}" if summary else ""
+    return (
+        f"- {event.created_at} `{event.thread_key or '-'}` "
+        f"{event.producer_id}/{event.event_type} "
+        f"id={_short_event_id(event.event_id)} outcome=`{event.outcome}`{summary_text}"
+    )
+
+
+def _clip(value: str, max_len: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1] + "…"
+
+
+def _diagnostic_summary(event: Any) -> str:
+    # Rejected events can be attacker-controlled probes. Keep diagnostics useful
+    # without echoing unauthenticated text back into chat.
+    if str(getattr(event, "outcome", "")).startswith("rejected_"):
+        return ""
+    return _clip(_redact_diagnostic_text(getattr(event, "summary", "")), 80)
+
+
+def _redact_diagnostic_text(value: str) -> str:
+    text = str(value or "")
+    text = re.sub(
+        r"(?i)\b(secret|token|authorization|cookie|signature|password|credential)\b\s*[:=]\s*\S+",
+        lambda match: f"{match.group(1)}=<redacted>",
+        text,
+    )
+    text = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+", "Bearer <redacted>", text)
+    return text
+
+
+def _short_event_id(event_id: str) -> str:
+    text = str(event_id or "")
+    return f"…{text[-8:]}" if len(text) > 8 else (text or "-")
+
+
 def _cmd_list(registry: Any, *, owner_user_id: str) -> str:
     if not owner_user_id:
         return "no async-thread listeners for this user. create one with `/ath listen <producer>`."
@@ -149,6 +250,8 @@ def _cmd_inspect(registry: Any, thread_key: str, *, owner_user_id: str) -> str:
         return "async-thread listener not found."
     state = "enabled" if h.enabled else "disabled"
     events = ", ".join(h.allowed_event_types) if h.allowed_event_types else "all"
+    recent_events = registry.list_recent_events(thread_key=thread_key, owner_user_id=owner_user_id, limit=3)
+    recent_text = "\n".join(_format_event_row(event) for event in recent_events) if recent_events else "none"
     return (
         f"`{h.thread_key}` {state}\n"
         f"producer: `{h.producer_id}`\n"
@@ -157,7 +260,8 @@ def _cmd_inspect(registry: Any, thread_key: str, *, owner_user_id: str) -> str:
         f"platform/chat/thread: `{h.platform}` / `{h.chat_id}` / `{h.thread_id or '-'}`\n"
         f"sessionKey: `{h.session_key or '-'}`\n"
         f"created: {h.created_at}\n"
-        "secret: hidden"
+        "secret: hidden\n"
+        f"recent events:\n{recent_text}"
     )
 
 
@@ -189,6 +293,13 @@ async def _send_notice(gateway: Any, event: Any, content: str) -> None:
         return
     metadata = {"thread_id": source.thread_id} if getattr(source, "thread_id", None) else None
     await adapter.send(source.chat_id, content, metadata=metadata)
+
+
+def _async_threads_adapter(gateway: Any) -> Any:
+    for platform, adapter in getattr(gateway, "adapters", {}).items():
+        if getattr(platform, "value", None) == "async_threads":
+            return adapter
+    return None
 
 
 def _platform_config(gateway: Any) -> Any:
