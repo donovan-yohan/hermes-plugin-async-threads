@@ -7,6 +7,7 @@ import shlex
 from typing import Any
 
 from .adapter import registry_from_config, registry_path_from_config
+from .registry import safe_session_key_hash
 
 
 USAGE = """async threads (/ath)
@@ -191,11 +192,37 @@ def _parse_events_args(args: list[str]) -> tuple[str | None, int]:
 def _format_event_row(event: Any) -> str:
     summary = _diagnostic_summary(event)
     summary_text = f" — {summary}" if summary else ""
+    detail = _format_event_detail(getattr(event, "detail", {}) or {})
+    detail_text = f" [{detail}]" if detail else ""
     return (
         f"- {event.created_at} `{event.thread_key or '-'}` "
         f"{event.producer_id}/{event.event_type} "
-        f"id={_short_event_id(event.event_id)} outcome=`{event.outcome}`{summary_text}"
+        f"id={_short_event_id(event.event_id)} outcome=`{event.outcome}`{summary_text}{detail_text}"
     )
+
+
+def _format_event_detail(detail: dict[str, Any]) -> str:
+    keys = [
+        "target_platform",
+        "gateway_runner_exists",
+        "target_adapter_exists",
+        "policy",
+        "session_key_present",
+        "session_key_hash",
+        "active_session",
+        "queued",
+        "handle_message_called",
+        "handle_message_returned",
+        "direct_send_success",
+        "exception_class",
+        "exception_message",
+    ]
+    parts: list[str] = []
+    for key in keys:
+        if key in detail:
+            value = _clip(str(detail[key]), 48)
+            parts.append(f"{key}={value}")
+    return ", ".join(parts)
 
 
 def _clip(value: str, max_len: int) -> str:
@@ -214,13 +241,28 @@ def _diagnostic_summary(event: Any) -> str:
 
 
 def _redact_diagnostic_text(value: str) -> str:
-    text = str(value or "")
+    text = str(value or "")[:1000]
     text = re.sub(
-        r"(?i)\b(secret|token|authorization|cookie|signature|password|credential)\b\s*[:=]\s*\S+",
+        r"(?i)\b(session[-_]?key|sessionKey)\b\s*[:= ]\s*[^,;\r\n]+",
+        lambda match: f"{match.group(1)}=<redacted>",
+        text,
+    )
+    text = re.sub(
+        r"\bagent:[A-Za-z0-9._:-]+",
+        "agent:<redacted>",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\b(authorization|cookie|signature)\b\s*[:= ]\s*[^,;\r\n]+",
         lambda match: f"{match.group(1)}=<redacted>",
         text,
     )
     text = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+", "Bearer <redacted>", text)
+    text = re.sub(
+        r"(?i)\b(x[-_]?api[-_]?key|api[-_]?key|secret|token|password|credential)\b\s*[:=]\s*\S+",
+        lambda match: f"{match.group(1)}=<redacted>",
+        text,
+    )
     return text
 
 
@@ -252,13 +294,15 @@ def _cmd_inspect(registry: Any, thread_key: str, *, owner_user_id: str) -> str:
     events = ", ".join(h.allowed_event_types) if h.allowed_event_types else "all"
     recent_events = registry.list_recent_events(thread_key=thread_key, owner_user_id=owner_user_id, limit=3)
     recent_text = "\n".join(_format_event_row(event) for event in recent_events) if recent_events else "none"
+    session_key_state = "present" if h.session_key else "-"
+    session_key_hash = safe_session_key_hash(h.session_key) or "-"
     return (
         f"`{h.thread_key}` {state}\n"
         f"producer: `{h.producer_id}`\n"
         f"policy: `{h.policy}`\n"
         f"events: {events}\n"
         f"platform/chat/thread: `{h.platform}` / `{h.chat_id}` / `{h.thread_id or '-'}`\n"
-        f"sessionKey: `{h.session_key or '-'}`\n"
+        f"sessionKey: {session_key_state} hash=`{session_key_hash}`\n"
         f"created: {h.created_at}\n"
         "secret: hidden\n"
         f"recent events:\n{recent_text}"

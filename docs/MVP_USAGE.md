@@ -64,6 +64,8 @@ Management and diagnostics commands:
 
 The registry schema stores optional `event_log.detail_json` for structured diagnostics. Details are allowlisted and sanitized before persistence; unsafe keys such as `secret`, `token`, `authorization`, `cookie`, `signature`, `payload`, `body`, `raw`, and credential-like fields are omitted or redacted.
 
+Dispatch diagnostics currently include only privacy-safe operator metadata: target platform, gateway-runner/target-adapter presence, policy, whether a session key was present, a short hash of the resolved session key, active-session/queue state, whether `handle_message` was called/returned, direct-send success, and sanitized exception class/message. These fields say what the plugin knows about initial dispatch; they do not prove final user-visible delivery.
+
 ## Event shape
 
 ```json

@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any, Mapping
 
-from .registry import AsyncThreadHandle, AsyncThreadRegistry
+from .registry import AsyncThreadHandle, AsyncThreadRegistry, safe_session_key_hash
 from .rendering import render_event_message
 from .security import (
     DEFAULT_REPLAY_WINDOW_SECONDS,
@@ -20,6 +20,12 @@ from .security import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class DispatchEventError(RuntimeError):
+    def __init__(self, message: str, *, detail: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.detail = detail or {}
 
 
 def check_requirements() -> bool:
@@ -187,11 +193,20 @@ def _build_adapter_base():
                     return web.json_response({"status": "duplicate", "threadKey": handle.thread_key})
 
                 try:
-                    outcome = await self.dispatch_event(handle, data, fields)
+                    outcome, detail = await self.dispatch_event(handle, data, fields)
                 except Exception as exc:
                     self._registry.forget_seen(
                         producer_id=fields["producer_id"],
                         event_id=fields["event_id"],
+                    )
+                    detail = dict(getattr(exc, "detail", {}) or {})
+                    detail.update(
+                        {
+                            "policy": handle.policy,
+                            "target_platform": handle.platform,
+                            "exception_class": type(exc).__name__,
+                            "exception_message": str(exc),
+                        }
                     )
                     self._registry.log_event(
                         producer_id=fields["producer_id"],
@@ -200,12 +215,7 @@ def _build_adapter_base():
                         event_type=fields["event_type"],
                         outcome="dispatch_failed",
                         summary=fields["summary"],
-                        detail={
-                            "policy": handle.policy,
-                            "target_platform": handle.platform,
-                            "exception_class": type(exc).__name__,
-                            "exception_message": str(exc),
-                        },
+                        detail=detail,
                     )
                     raise
                 self._registry.log_event(
@@ -215,14 +225,14 @@ def _build_adapter_base():
                     event_type=fields["event_type"],
                     outcome=outcome,
                     summary=fields["summary"],
-                    detail={"policy": handle.policy, "target_platform": handle.platform},
+                    detail=detail,
                 )
                 status = 200 if outcome == "delivered" else 202
                 return web.json_response({"status": outcome, "threadKey": handle.thread_key}, status=status)
             except EventValidationError as exc:
                 return web.json_response({"error": str(exc)}, status=400)
             except Exception as exc:  # noqa: BLE001
-                logger.exception("async-thread event dispatch failed")
+                logger.error("async-thread event dispatch failed: %s", type(exc).__name__)
                 return web.json_response({"error": "event dispatch failed"}, status=502)
 
         async def dispatch_event(
@@ -230,14 +240,24 @@ def _build_adapter_base():
             handle: AsyncThreadHandle,
             data: Mapping[str, Any],
             fields: Mapping[str, str],
-        ) -> str:
+        ) -> tuple[str, dict[str, Any]]:
             source = SessionSource.from_dict(handle.source)
+            detail: dict[str, Any] = {
+                "policy": handle.policy,
+                "target_platform": source.platform.value,
+                "gateway_runner_exists": self.gateway_runner is not None,
+                "session_key_present": bool(handle.session_key),
+            }
+            if handle.session_key:
+                detail["session_key_hash"] = safe_session_key_hash(handle.session_key)
             runner = self.gateway_runner
             if runner is None:
-                raise RuntimeError("gateway runner unavailable")
+                detail["target_adapter_exists"] = False
+                raise DispatchEventError("gateway runner unavailable", detail=detail)
             target_adapter = runner.adapters.get(source.platform)
+            detail["target_adapter_exists"] = target_adapter is not None
             if target_adapter is None:
-                raise RuntimeError(f"target platform not connected: {source.platform.value}")
+                raise DispatchEventError(f"target platform not connected: {source.platform.value}", detail=detail)
 
             text = render_event_message(
                 data,
@@ -247,10 +267,16 @@ def _build_adapter_base():
             )
             if handle.policy == "direct":
                 metadata = {"thread_id": source.thread_id} if source.thread_id else None
-                result = await target_adapter.send(source.chat_id, text, metadata=metadata)
-                if not getattr(result, "success", False):
-                    raise RuntimeError("direct delivery failed")
-                return "delivered"
+                try:
+                    result = await target_adapter.send(source.chat_id, text, metadata=metadata)
+                except Exception as exc:
+                    detail["direct_send_success"] = False
+                    raise DispatchEventError(str(exc), detail=detail) from exc
+                detail["direct_send_success"] = bool(getattr(result, "success", False))
+                if not detail["direct_send_success"]:
+                    error = getattr(result, "error", None) or "direct delivery failed"
+                    raise DispatchEventError(str(error), detail=detail)
+                return "delivered", detail
 
             event = MessageEvent(
                 text=text,
@@ -271,17 +297,31 @@ def _build_adapter_base():
                 group_sessions_per_user=target_adapter.config.extra.get("group_sessions_per_user", True),
                 thread_sessions_per_user=target_adapter.config.extra.get("thread_sessions_per_user", False),
             )
+            detail["session_key_present"] = bool(session_key)
+            if session_key:
+                detail["session_key_hash"] = safe_session_key_hash(session_key)
             active_sessions = getattr(target_adapter, "_active_sessions", {})
-            if session_key in active_sessions:
+            active_session = session_key in active_sessions
+            detail["active_session"] = active_session
+            detail["queued"] = False
+            detail["handle_message_called"] = False
+            detail["handle_message_returned"] = False
+            if active_session:
                 merge_pending_message_event(
                     target_adapter._pending_messages,
                     session_key,
                     event,
                     merge_text=True,
                 )
-                return "queued"
-            await target_adapter.handle_message(event)
-            return "accepted"
+                detail["queued"] = True
+                return "queued", detail
+            detail["handle_message_called"] = True
+            try:
+                await target_adapter.handle_message(event)
+            except Exception as exc:
+                raise DispatchEventError(str(exc), detail=detail) from exc
+            detail["handle_message_returned"] = True
+            return "accepted", detail
 
     return _AsyncThreadsAdapter
 
