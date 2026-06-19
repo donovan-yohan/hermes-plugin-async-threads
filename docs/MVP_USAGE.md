@@ -48,15 +48,19 @@ The command replies with:
 - receiver URL
 - generated HMAC secret, shown once
 
-Management commands:
+Management and diagnostics commands:
 
 ```text
+/ath status
 /ath list
+/ath events [thread_key] [--limit N]
 /ath inspect <thread_key>
 /ath pause <thread_key>
 /ath resume <thread_key>
 /ath revoke <thread_key>
 ```
+
+`/ath status` prints the receiver URL, live registry path, listener count, and recent event count for the current user. `/ath events` shows compact recent event rows with redacted summaries for authenticated events; rejected events do not echo producer-supplied summaries. Secrets, HMACs, tokens, cookies, raw credentials, and full payload bodies are not printed.
 
 ## Event shape
 

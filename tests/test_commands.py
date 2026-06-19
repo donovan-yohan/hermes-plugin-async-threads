@@ -99,3 +99,76 @@ def test_listener_management_commands_are_owner_scoped(tmp_path):
     mine_after_pause = registry.get_handle(mine.thread_key)
     assert mine_after_pause is not None
     assert mine_after_pause.enabled is False
+
+
+def test_status_events_and_inspect_show_owner_scoped_diagnostics(tmp_path):
+    registry_path = tmp_path / "ath.sqlite3"
+    registry = AsyncThreadRegistry(registry_path)
+    mine = registry.create_handle(
+        source={"platform": "discord", "chat_id": "c", "chat_type": "channel", "thread_id": "t"},
+        producer_id="relay",
+        owner_user_id="u1",
+    )
+    other = registry.create_handle(
+        source={"platform": "discord", "chat_id": "c2", "chat_type": "channel", "thread_id": "t2"},
+        producer_id="relay",
+        owner_user_id="u2",
+    )
+    registry.log_event(
+        producer_id="relay",
+        event_id="evt_123456789",
+        thread_key=mine.thread_key,
+        event_type="relay.session.pr_opened",
+        outcome="accepted",
+        summary="PR opened token=supersecret Bearer abc123 and ready for review",
+    )
+    registry.log_event(
+        producer_id="relay",
+        event_id="evt_rejected",
+        thread_key=mine.thread_key,
+        event_type="relay.session.pr_opened",
+        outcome="rejected_signature",
+        summary="secret=bad should not echo",
+    )
+    registry.log_event(
+        producer_id="relay",
+        event_id="evt_other",
+        thread_key=other.thread_key,
+        event_type="relay.session.pr_opened",
+        outcome="accepted",
+        summary="should not leak",
+    )
+    async_adapter = SimpleNamespace(
+        config=PlatformConfig(
+            enabled=True,
+            extra={"registry_path": str(registry_path), "host": "0.0.0.0", "port": 9999},
+        ),
+        _running=True,
+    )
+    gateway = SimpleNamespace(
+        adapters={Platform("async_threads"): async_adapter},
+        config=SimpleNamespace(group_sessions_per_user=True, thread_sessions_per_user=False),
+        session_store=None,
+    )
+    event = SimpleNamespace(source=SimpleNamespace(user_id="u1"))
+
+    status = _run_command("status", event=event, gateway=gateway)
+    assert "receiver: `http://localhost:9999/async-threads/v1/events`" in status
+    assert f"registry: `{registry_path}`" in status
+    assert "listeners: 1" in status
+    assert "recent events: 2" in status
+
+    events = _run_command("events --limit 5", event=event, gateway=gateway)
+    assert mine.thread_key in events
+    assert "…23456789" in events
+    assert "token=<redacted>" in events
+    assert "Bearer <redacted>" in events
+    assert "supersecret" not in events
+    assert "secret=bad" not in events
+    assert "should not echo" not in events
+    assert "should not leak" not in events
+
+    inspected = _cmd_inspect(registry, mine.thread_key, owner_user_id="u1")
+    assert "recent events:" in inspected
+    assert "relay.session.pr_opened" in inspected
+    assert "secret: hidden" in inspected

@@ -48,6 +48,18 @@ class AsyncThreadHandle:
         return str(self.source.get("thread_id") or "")
 
 
+@dataclass(frozen=True)
+class AsyncThreadEventLog:
+    id: int
+    producer_id: str
+    event_id: str
+    thread_key: str
+    event_type: str
+    outcome: str
+    summary: str
+    created_at: str
+
+
 class AsyncThreadRegistry:
     """Durable listener registry.
 
@@ -128,6 +140,9 @@ class AsyncThreadRegistry:
                     summary text,
                     created_at text not null
                 );
+
+                create index if not exists idx_event_log_thread_key
+                    on event_log(thread_key);
                 """
             )
             conn.execute(
@@ -208,6 +223,51 @@ class AsyncThreadRegistry:
             rows = conn.execute(sql, params).fetchall()
         return [_row_to_handle(row) for row in rows]
 
+    def count_handles(self, *, owner_user_id: str | None = None) -> int:
+        sql = "select count(*) from async_thread_handles"
+        params: list[Any] = []
+        if owner_user_id:
+            sql += " where owner_user_id = ?"
+            params.append(owner_user_id)
+        with self._connect() as conn:
+            return int(conn.execute(sql, params).fetchone()[0])
+
+    def count_recent_events(
+        self,
+        *,
+        thread_key: str | None = None,
+        owner_user_id: str | None = None,
+    ) -> int:
+        sql, params = _event_query(
+            "select count(*)",
+            thread_key=thread_key,
+            owner_user_id=owner_user_id,
+        )
+        with self._connect() as conn:
+            return int(conn.execute(sql, params).fetchone()[0])
+
+    def list_recent_events(
+        self,
+        *,
+        thread_key: str | None = None,
+        owner_user_id: str | None = None,
+        limit: int = 20,
+    ) -> list[AsyncThreadEventLog]:
+        limit = max(1, min(int(limit or 20), 50))
+        sql, params = _event_query(
+            """
+            select e.id, e.producer_id, e.event_id, e.thread_key, e.event_type,
+                   e.outcome, e.summary, e.created_at
+            """,
+            thread_key=thread_key,
+            owner_user_id=owner_user_id,
+        )
+        sql += " order by e.id desc limit ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [_row_to_event(row) for row in rows]
+
     def set_enabled(self, thread_key: str, enabled: bool) -> bool:
         with self._connect() as conn:
             cur = conn.execute(
@@ -283,6 +343,40 @@ def _row_to_handle(row: sqlite3.Row) -> AsyncThreadHandle:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _row_to_event(row: sqlite3.Row) -> AsyncThreadEventLog:
+    return AsyncThreadEventLog(
+        id=int(row["id"]),
+        producer_id=row["producer_id"],
+        event_id=row["event_id"],
+        thread_key=row["thread_key"] or "",
+        event_type=row["event_type"] or "",
+        outcome=row["outcome"],
+        summary=row["summary"] or "",
+        created_at=row["created_at"],
+    )
+
+
+def _event_query(
+    select_clause: str,
+    *,
+    thread_key: str | None = None,
+    owner_user_id: str | None = None,
+) -> tuple[str, list[Any]]:
+    sql = f"{select_clause} from event_log e"
+    params: list[Any] = []
+    clauses: list[str] = []
+    if owner_user_id:
+        sql += " join async_thread_handles h on h.thread_key = e.thread_key"
+        clauses.append("h.owner_user_id = ?")
+        params.append(owner_user_id)
+    if thread_key:
+        clauses.append("e.thread_key = ?")
+        params.append(thread_key)
+    if clauses:
+        sql += " where " + " and ".join(clauses)
+    return sql, params
 
 
 def _clean_token(value: str, *, default: str) -> str:
