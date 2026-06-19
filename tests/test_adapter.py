@@ -134,6 +134,115 @@ def test_render_event_message_redacts_hostile_payload_before_prompt_text():
     assert "ok" in text
 
 
+def test_finished_event_defaults_to_compact_tail_without_raw_transcript():
+    raw_tail = "line one\n" + "very noisy output\n" * 200 + "FINAL_SECRET=do-not-print"
+    text = render_event_message(
+        {
+            "eventType": "relay.lane.finished",
+            "payload": {
+                "lane": "issue17",
+                "verdict": "passed",
+                "head_sha": "13df23b",
+                "pr_url": "https://github.com/donovan-yohan/hermes-plugin-async-threads/pull/20",
+                "changed_files": ["async_threads/rendering.py"],
+                "verification": "36 passed",
+                "log_path": "/tmp/ath/issue17.log",
+                "tail": raw_tail,
+            },
+        },
+        event_type="relay.lane.finished",
+        producer_id="relay-ath-dev",
+        summary="lane finished",
+    )
+
+    assert "Tail mode: compact" in text
+    assert "very noisy output" not in text
+    assert "do-not-print" not in text
+    assert '"omitted": true' in text
+    assert '"log_path": "/tmp/ath/issue17.log"' in text
+    assert '"verification": "36 passed"' in text
+
+
+def test_tail_mode_none_omits_raw_tail_entirely():
+    text = render_event_message(
+        {"tailMode": "none", "payload": {"lane": "issue17", "tail": "raw line should vanish", "log_path": "/tmp/log"}},
+        event_type="relay.lane.progress",
+        producer_id="relay-ath-dev",
+        summary="progress",
+    )
+
+    assert "Tail mode: none" in text
+    assert "raw line should vanish" not in text
+    assert "omitted" not in text
+    assert '"log_path": "/tmp/log"' in text
+
+
+def test_tail_mode_debug_includes_capped_redacted_tail():
+    text = render_event_message(
+        {
+            "payload": {
+                "tail_mode": "debug",
+                "tail": "Bearer debug-token\n" + ("x" * 2000),
+            }
+        },
+        event_type="relay.lane.failed",
+        producer_id="relay-ath-dev",
+        summary="debug requested",
+    )
+
+    assert "Tail mode: debug" in text
+    assert "debug-token" not in text
+    assert "Bearer <redacted>" in text
+    assert "<debug-tail-truncated>" in text
+    assert len(text) < 4000
+
+
+def test_structured_debug_tail_redacts_unsafe_keys_before_stringifying():
+    text = render_event_message(
+        {
+            "tailMode": "debug",
+            "payload": {
+                "tail": {"password": "hunter2", "api_key": "abc123", "safe": "kept"},
+                "log_path": "/tmp/lane.log",
+            },
+        },
+        event_type="relay.lane.failed",
+        producer_id="relay-ath-dev",
+        summary="debug structured tail",
+    )
+
+    assert "hunter2" not in text
+    assert "abc123" not in text
+    assert "password" in text
+    assert "api_key" in text
+    assert "<redacted>" in text
+    assert "kept" in text
+
+
+def test_camelcase_tail_keys_and_large_fields_are_compacted():
+    text = render_event_message(
+        {
+            "payload": {
+                "fullOutput": "full output should not leak",
+                "commandOutput": "command output should not leak",
+                "rawTranscript": "raw transcript should not leak",
+                "body": "A" * 1800,
+                "log_path": "/tmp/big.log",
+            }
+        },
+        event_type="relay.lane.progress",
+        producer_id="relay-ath-dev",
+        summary="large body",
+    )
+
+    assert "full output should not leak" not in text
+    assert "command output should not leak" not in text
+    assert "raw transcript should not leak" not in text
+    assert "A" * 200 not in text
+    assert text.count('"omitted": true') >= 4
+    assert '"log_path": "/tmp/big.log"' in text
+
+
 @pytest.mark.asyncio
 async def test_dispatch_idle_injects_message_into_target_adapter(tmp_path):
     config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})

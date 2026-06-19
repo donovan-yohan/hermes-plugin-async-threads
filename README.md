@@ -47,7 +47,8 @@ MVP implementation includes:
 - signed `async-thread-event/v1` HTTP endpoint;
 - de-dupe by producer/event id;
 - idle-session wake and active-session queue behavior;
-- privacy-safe dispatch diagnostics and opt-in `agent_queue` acknowledgements.
+- privacy-safe dispatch diagnostics and opt-in `agent_queue` acknowledgements;
+- compact long-running lane event rendering with `tailMode: none | compact | debug` so raw tails are opt-in and capped.
 
 See [`docs/MVP_USAGE.md`](docs/MVP_USAGE.md) for install/config and test-event shape.
 
