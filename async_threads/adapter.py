@@ -135,7 +135,7 @@ def _build_adapter_base():
                         outcome="rejected_missing_or_disabled_handle",
                         summary=fields["summary"],
                     )
-                    return web.json_response({"error": "unknown or disabled async thread"}, status=404)
+                    return web.json_response({"error": "invalid signature"}, status=401)
                 if handle.producer_id != fields["producer_id"]:
                     self._registry.log_event(
                         producer_id=fields["producer_id"],
@@ -145,7 +145,7 @@ def _build_adapter_base():
                         outcome="rejected_producer_scope",
                         summary=fields["summary"],
                     )
-                    return web.json_response({"error": "producer not allowed for async thread"}, status=403)
+                    return web.json_response({"error": "invalid signature"}, status=401)
                 if handle.allowed_event_types and fields["event_type"] not in handle.allowed_event_types:
                     self._registry.log_event(
                         producer_id=fields["producer_id"],
@@ -155,7 +155,7 @@ def _build_adapter_base():
                         outcome="rejected_event_type",
                         summary=fields["summary"],
                     )
-                    return web.json_response({"error": "event type not allowed"}, status=403)
+                    return web.json_response({"error": "invalid signature"}, status=401)
                 if not verify_hmac_signature(raw, handle.secret, signature_header(request.headers)):
                     self._registry.log_event(
                         producer_id=fields["producer_id"],

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -18,11 +19,18 @@ class EventValidationError(ValueError):
     """Raised when an incoming async-thread event fails validation."""
 
 
+def _reject_json_constant(constant: str) -> None:
+    raise ValueError(f"invalid json constant: {constant}")
+
+
 def parse_json_body(raw_body: bytes, *, max_bytes: int = MAX_BODY_BYTES) -> dict[str, Any]:
     if len(raw_body) > max_bytes:
         raise EventValidationError("body too large")
     try:
-        data = json.loads(raw_body.decode("utf-8"))
+        data = json.loads(
+            raw_body.decode("utf-8"),
+            parse_constant=_reject_json_constant,
+        )
     except Exception as exc:  # noqa: BLE001 - convert to safe client error
         raise EventValidationError("invalid json") from exc
     if not isinstance(data, dict):
@@ -45,7 +53,7 @@ def signature_header(headers: Mapping[str, str]) -> str:
 def verify_hmac_signature(raw_body: bytes, secret: str, supplied: str) -> bool:
     if not secret or not supplied:
         return False
-    supplied = supplied.strip()
+    supplied = supplied.strip().lower()
     if supplied.startswith("sha256="):
         supplied = supplied.split("=", 1)[1]
     if not supplied:
@@ -73,19 +81,24 @@ def validate_timestamp(
     now: float | None = None,
     replay_window_seconds: int = DEFAULT_REPLAY_WINDOW_SECONDS,
 ) -> None:
-    if not occurred_at:
-        return
+    if occurred_at is None or occurred_at == "":
+        raise EventValidationError("missing occurredAt")
     now = time.time() if now is None else now
     try:
         if isinstance(occurred_at, (int, float)):
             ts = float(occurred_at)
         else:
-            text = str(occurred_at).strip()
-            if text.endswith("Z"):
-                text = text[:-1] + "+00:00"
-            ts = datetime.fromisoformat(text).astimezone(timezone.utc).timestamp()
+            try:
+                ts = float(occurred_at)
+            except (TypeError, ValueError):
+                text = str(occurred_at).strip()
+                if text.endswith("Z"):
+                    text = text[:-1] + "+00:00"
+                ts = datetime.fromisoformat(text).astimezone(timezone.utc).timestamp()
     except Exception as exc:  # noqa: BLE001
         raise EventValidationError("invalid occurredAt") from exc
+    if not math.isfinite(ts):
+        raise EventValidationError("invalid occurredAt")
     if abs(now - ts) > replay_window_seconds:
         raise EventValidationError("event timestamp outside replay window")
 

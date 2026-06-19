@@ -62,16 +62,17 @@ def _run_command(raw_args: str, *, event: Any, gateway: Any) -> str:
 
     if command == "listen":
         return _cmd_listen(argv[1:], event=event, gateway=gateway, registry=registry)
+    owner_user_id = str(getattr(event.source, "user_id", "") or "")
     if command in {"list", "ls"}:
-        return _cmd_list(registry, owner_user_id=str(getattr(event.source, "user_id", "") or ""))
+        return _cmd_list(registry, owner_user_id=owner_user_id)
     if command == "inspect" and len(argv) >= 2:
-        return _cmd_inspect(registry, argv[1])
+        return _cmd_inspect(registry, argv[1], owner_user_id=owner_user_id)
     if command in {"pause", "disable"} and len(argv) >= 2:
-        return _cmd_set_enabled(registry, argv[1], False, "paused")
+        return _cmd_set_enabled(registry, argv[1], False, "paused", owner_user_id=owner_user_id)
     if command in {"resume", "enable"} and len(argv) >= 2:
-        return _cmd_set_enabled(registry, argv[1], True, "resumed")
+        return _cmd_set_enabled(registry, argv[1], True, "resumed", owner_user_id=owner_user_id)
     if command in {"revoke", "remove", "rm"} and len(argv) >= 2:
-        return _cmd_set_enabled(registry, argv[1], False, "revoked")
+        return _cmd_set_enabled(registry, argv[1], False, "revoked", owner_user_id=owner_user_id)
     return USAGE
 
 
@@ -128,7 +129,9 @@ def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> 
 
 
 def _cmd_list(registry: Any, *, owner_user_id: str) -> str:
-    handles = registry.list_handles(owner_user_id=owner_user_id or None)
+    if not owner_user_id:
+        return "no async-thread listeners for this user. create one with `/ath listen <producer>`."
+    handles = registry.list_handles(owner_user_id=owner_user_id)
     if not handles:
         return "no async-thread listeners for this user. create one with `/ath listen <producer>`."
     lines = ["async-thread listeners:"]
@@ -140,9 +143,9 @@ def _cmd_list(registry: Any, *, owner_user_id: str) -> str:
     return "\n".join(lines)
 
 
-def _cmd_inspect(registry: Any, thread_key: str) -> str:
+def _cmd_inspect(registry: Any, thread_key: str, *, owner_user_id: str) -> str:
     h = registry.get_handle(thread_key)
-    if h is None:
+    if h is None or not owner_user_id or h.owner_user_id != owner_user_id:
         return "async-thread listener not found."
     state = "enabled" if h.enabled else "disabled"
     events = ", ".join(h.allowed_event_types) if h.allowed_event_types else "all"
@@ -158,7 +161,10 @@ def _cmd_inspect(registry: Any, thread_key: str) -> str:
     )
 
 
-def _cmd_set_enabled(registry: Any, thread_key: str, enabled: bool, verb: str) -> str:
+def _cmd_set_enabled(registry: Any, thread_key: str, enabled: bool, verb: str, *, owner_user_id: str) -> str:
+    h = registry.get_handle(thread_key)
+    if h is None or not owner_user_id or h.owner_user_id != owner_user_id:
+        return "async-thread listener not found."
     if not registry.set_enabled(thread_key, enabled):
         return "async-thread listener not found."
     return f"{verb} async-thread listener `{thread_key}`."

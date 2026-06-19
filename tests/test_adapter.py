@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -140,6 +141,7 @@ async def test_dispatch_failure_does_not_poison_event_id_retry(tmp_path):
             "eventId": "evt_retry",
             "eventType": "relay.session.pr_opened",
             "producer": {"id": "relay"},
+            "occurredAt": time.time(),
             "asyncThread": {"threadKey": handle.thread_key},
             "summary": "retry me",
         }
@@ -153,3 +155,46 @@ async def test_dispatch_failure_does_not_poison_event_id_retry(tmp_path):
     second = await adapter._handle_event(FakeRequest(body, handle.secret))
     assert second.status == 202
     assert len(target.handled) == 1
+
+
+@pytest.mark.asyncio
+async def test_auth_failures_use_generic_unauthorized_response(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(
+        source=source.to_dict(),
+        producer_id="relay",
+        allowed_event_types=["relay.session.pr_opened"],
+    )
+
+    async def post(body: dict, secret: str):
+        raw = json.dumps(body).encode()
+        return await adapter._handle_event(FakeRequest(raw, secret))
+
+    base = {
+        "version": "async-thread-event/v1",
+        "eventId": "evt_auth",
+        "eventType": "relay.session.pr_opened",
+        "producer": {"id": "relay"},
+        "occurredAt": time.time(),
+        "asyncThread": {"threadKey": handle.thread_key},
+        "summary": "auth probe",
+    }
+
+    wrong_thread = {**base, "asyncThread": {"threadKey": "ath_missing"}}
+    wrong_producer = {**base, "eventId": "evt_auth_2", "producer": {"id": "other"}}
+    wrong_type = {**base, "eventId": "evt_auth_3", "eventType": "relay.session.other"}
+
+    responses = [
+        await post(wrong_thread, "wrong-secret"),
+        await post(wrong_producer, handle.secret),
+        await post(wrong_type, handle.secret),
+        await post({**base, "eventId": "evt_auth_4"}, "wrong-secret"),
+    ]
+    registry.set_enabled(handle.thread_key, False)
+    responses.append(await post({**base, "eventId": "evt_auth_5"}, handle.secret))
+
+    assert [response.status for response in responses] == [401] * 5
+    assert [json.loads(response.text)["error"] for response in responses] == ["invalid signature"] * 5

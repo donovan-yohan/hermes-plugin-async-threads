@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
-from async_threads.commands import _run_command, handle_pre_gateway_dispatch
+from async_threads.commands import _cmd_inspect, _cmd_list, _cmd_set_enabled, _run_command, handle_pre_gateway_dispatch
+from async_threads.registry import AsyncThreadRegistry
 from gateway.config import Platform, PlatformConfig
 from gateway.platform_registry import PlatformEntry, platform_registry
 from gateway.session import SessionSource
@@ -68,3 +69,33 @@ def test_pre_gateway_hook_returns_skip_dict_for_ath_help():
     result = handle_pre_gateway_dispatch(event=event, gateway=gateway, session_store=None)
 
     assert result == {"action": "skip", "reason": "async_threads_command"}
+
+
+def test_listener_management_commands_are_owner_scoped(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    mine = registry.create_handle(
+        source={"platform": "discord", "chat_id": "c", "chat_type": "channel", "thread_id": "t"},
+        producer_id="relay",
+        owner_user_id="u1",
+    )
+    other = registry.create_handle(
+        source={"platform": "discord", "chat_id": "c2", "chat_type": "channel", "thread_id": "t2"},
+        producer_id="relay",
+        owner_user_id="u2",
+    )
+
+    listing = _cmd_list(registry, owner_user_id="u1")
+    assert mine.thread_key in listing
+    assert other.thread_key not in listing
+
+    assert _cmd_list(registry, owner_user_id="") == "no async-thread listeners for this user. create one with `/ath listen <producer>`."
+    assert "producer: `relay`" in _cmd_inspect(registry, mine.thread_key, owner_user_id="u1")
+    assert _cmd_inspect(registry, other.thread_key, owner_user_id="u1") == "async-thread listener not found."
+    assert _cmd_set_enabled(registry, other.thread_key, False, "paused", owner_user_id="u1") == "async-thread listener not found."
+    other_after_denied = registry.get_handle(other.thread_key)
+    assert other_after_denied is not None
+    assert other_after_denied.enabled is True
+    assert _cmd_set_enabled(registry, mine.thread_key, False, "paused", owner_user_id="u1") == f"paused async-thread listener `{mine.thread_key}`."
+    mine_after_pause = registry.get_handle(mine.thread_key)
+    assert mine_after_pause is not None
+    assert mine_after_pause.enabled is False
