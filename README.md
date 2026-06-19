@@ -46,7 +46,8 @@ MVP implementation includes:
 - `async_threads` gateway platform receiver;
 - signed `async-thread-event/v1` HTTP endpoint;
 - de-dupe by producer/event id;
-- idle-session wake and active-session queue behavior.
+- idle-session wake and active-session queue behavior;
+- privacy-safe dispatch diagnostics and opt-in `agent_queue` acknowledgements.
 
 See [`docs/MVP_USAGE.md`](docs/MVP_USAGE.md) for install/config and test-event shape.
 

@@ -29,5 +29,5 @@ def register(ctx) -> None:
         "ath",
         ath_help,
         description="Manage async-thread listeners",
-        args_hint="listen|list|revoke|pause|resume|inspect",
+        args_hint="listen|list|status|events|inspect|pause|resume|revoke",
     )

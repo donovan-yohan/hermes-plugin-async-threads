@@ -15,9 +15,13 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SAFE_DETAIL_KEYS = {
+    "ack_mode",
+    "ack_sent",
+    "ack_success",
+    "ack_error",
     "active_session",
     "direct_send_success",
     "error",
@@ -57,6 +61,7 @@ class AsyncThreadHandle:
     session_key: str = ""
     session_id: str = ""
     owner_user_id: str = ""
+    ack_mode: str = "none"
     created_at: str = ""
     updated_at: str = ""
 
@@ -133,7 +138,8 @@ class AsyncThreadRegistry:
                     producer_id text not null,
                     secret text not null,
                     allowed_event_types_json text not null default '[]',
-                    policy text not null default 'agent_queue'
+                    policy text not null default 'agent_queue',
+                    ack_mode text not null default 'none'
                 );
 
                 create index if not exists idx_async_thread_handles_owner
@@ -179,12 +185,18 @@ class AsyncThreadRegistry:
             )
 
     def _migrate_schema(self, conn: sqlite3.Connection) -> None:
-        columns = {
+        event_log_columns = {
             row["name"]
             for row in conn.execute("pragma table_info(event_log)").fetchall()
         }
-        if "detail_json" not in columns:
+        if "detail_json" not in event_log_columns:
             conn.execute("alter table event_log add column detail_json text not null default '{}'")
+        handle_columns = {
+            row["name"]
+            for row in conn.execute("pragma table_info(async_thread_handles)").fetchall()
+        }
+        if "ack_mode" not in handle_columns:
+            conn.execute("alter table async_thread_handles add column ack_mode text not null default 'none'")
 
     def create_handle(
         self,
@@ -197,9 +209,11 @@ class AsyncThreadRegistry:
         session_key: str = "",
         session_id: str = "",
         owner_user_id: str = "",
+        ack_mode: str = "none",
     ) -> AsyncThreadHandle:
         producer_id = _clean_token(producer_id, default="default")
         policy = policy if policy in {"agent_queue", "direct"} else "agent_queue"
+        ack_mode = ack_mode if ack_mode in {"none", "brief", "debug"} else "none"
         thread_key = f"ath_{secrets.token_urlsafe(12).replace('-', '').replace('_', '')[:16]}"
         secret = secrets.token_urlsafe(32)
         now = utc_now()
@@ -210,8 +224,8 @@ class AsyncThreadRegistry:
                 insert into async_thread_handles(
                     thread_key, created_at, updated_at, enabled, label, source_json,
                     session_key, session_id, owner_user_id, producer_id, secret,
-                    allowed_event_types_json, policy
-                ) values (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    allowed_event_types_json, policy, ack_mode
+                ) values (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     thread_key,
@@ -226,6 +240,7 @@ class AsyncThreadRegistry:
                     secret,
                     json.dumps(list(event_types)),
                     policy,
+                    ack_mode,
                 ),
             )
         return self.get_handle(thread_key)  # type: ignore[return-value]
@@ -379,6 +394,7 @@ def _row_to_handle(row: sqlite3.Row) -> AsyncThreadHandle:
         session_key=row["session_key"],
         session_id=row["session_id"],
         owner_user_id=row["owner_user_id"],
+        ack_mode=row["ack_mode"] or "none",
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

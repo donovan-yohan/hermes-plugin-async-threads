@@ -22,6 +22,7 @@ def test_registry_creates_lists_revokes_and_dedupes(tmp_path: Path):
     assert handle.secret
     assert handle.enabled is True
     assert handle.allowed_event_types == ("relay.session.pr_opened",)
+    assert handle.ack_mode == "none"
     with reg._connect() as conn:
         indexes = {
             row[0]
@@ -31,9 +32,14 @@ def test_registry_creates_lists_revokes_and_dedupes(tmp_path: Path):
             row["name"]
             for row in conn.execute("pragma table_info(event_log)").fetchall()
         }
+        handle_columns = {
+            row["name"]
+            for row in conn.execute("pragma table_info(async_thread_handles)").fetchall()
+        }
         schema_version = conn.execute("select value from meta where key = 'schema_version'").fetchone()[0]
     assert "idx_event_log_thread_key" in indexes
     assert "detail_json" in event_log_columns
+    assert "ack_mode" in handle_columns
     assert schema_version == str(SCHEMA_VERSION)
 
     listed = reg.list_handles(owner_user_id="u1")
@@ -195,11 +201,15 @@ def test_v1_registry_migrates_detail_json_without_data_loss(tmp_path: Path):
 
     with reg._connect() as migrated:
         columns = {row["name"] for row in migrated.execute("pragma table_info(event_log)").fetchall()}
+        handle_columns = {row["name"] for row in migrated.execute("pragma table_info(async_thread_handles)").fetchall()}
         schema_version = migrated.execute("select value from meta where key = 'schema_version'").fetchone()[0]
         detail_json = migrated.execute("select detail_json from event_log where event_id = 'evt_old'").fetchone()[0]
+        ack_mode = migrated.execute("select ack_mode from async_thread_handles where thread_key = 'ath_v1'").fetchone()[0]
     assert "detail_json" in columns
+    assert "ack_mode" in handle_columns
     assert schema_version == str(SCHEMA_VERSION)
     assert detail_json == "{}"
+    assert ack_mode == "none"
     old_events = reg.list_recent_events(thread_key="ath_v1", owner_user_id="u1")
     assert len(old_events) == 1
     assert old_events[0].summary == "old row"
@@ -211,6 +221,10 @@ def test_sanitize_event_detail_allowlists_and_redacts_safe_metadata():
         {
             "target_platform": "discord",
             "policy": "agent_queue",
+            "ack_mode": "brief",
+            "ack_sent": True,
+            "ack_success": False,
+            "ack_error": "signature sha256=deadbeef",
             "session_key_present": True,
             "active_session": False,
             "queued": False,
@@ -228,6 +242,10 @@ def test_sanitize_event_detail_allowlists_and_redacts_safe_metadata():
     )
 
     assert detail == {
+        "ack_error": "signature=<redacted>",
+        "ack_mode": "brief",
+        "ack_sent": True,
+        "ack_success": False,
         "active_session": False,
         "direct_send_success": False,
         "error": "secret=<redacted> api_key=<redacted> x-api-key=<redacted> token=<redacted> Bearer <redacted>",

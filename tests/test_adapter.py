@@ -106,6 +106,8 @@ async def test_dispatch_idle_injects_message_into_target_adapter(tmp_path):
 
     assert outcome == "agent_started"
     assert detail == {
+        "ack_mode": "none",
+        "ack_sent": False,
         "active_session": False,
         "gateway_runner_exists": True,
         "handle_message_called": True,
@@ -169,6 +171,98 @@ async def test_direct_policy_sends_without_agent(tmp_path):
     assert target.handled == []
     assert target.sent[0][0] == "c1"
     assert target.sent[0][2] == {"thread_id": "t1"}
+
+
+@pytest.mark.asyncio
+async def test_agent_queue_brief_ack_sends_visible_notice_before_handoff(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay-ide", ack_mode="brief")
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+
+    outcome, detail = await adapter.dispatch_event(handle, {"payload": {"secret": "nope"}}, _fields(handle))
+
+    assert outcome == "agent_started"
+    assert detail["ack_mode"] == "brief"
+    assert detail["ack_sent"] is True
+    assert detail["ack_success"] is True
+    assert len(target.sent) == 1
+    assert target.sent[0][0] == "c1"
+    assert target.sent[0][2] == {"thread_id": "t1"}
+    assert target.sent[0][1] == "received relay.session.pr_opened from relay-ide; starting continuation…"
+    assert "secret" not in target.sent[0][1].lower()
+    assert len(target.handled) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_queue_debug_ack_uses_only_safe_fields(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", ack_mode="debug")
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+
+    outcome, detail = await adapter.dispatch_event(
+        handle,
+        {"payload": {"token": "do-not-print"}},
+        {**_fields(handle), "event_id": "evt_secret_123456789", "summary": "token=bad"},
+    )
+
+    assert outcome == "agent_started"
+    assert detail["ack_success"] is True
+    ack = target.sent[0][1]
+    assert "async-thread event received" in ack
+    assert "eventId: `…23456789`" in ack
+    assert f"threadKey: `{handle.thread_key}`" in ack
+    assert "initialOutcome: `agent_started`" in ack
+    assert "token" not in ack.lower()
+    assert "do-not-print" not in ack
+
+
+@pytest.mark.asyncio
+async def test_ack_send_failure_is_logged_and_does_not_block_agent_queue(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", ack_mode="brief")
+    target = FakeTargetAdapter(fail_send=True)
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+
+    response = await adapter._handle_event(FakeRequest(_event_body(handle, "evt_ack_fail"), handle.secret))
+
+    assert response.status == 202
+    assert len(target.handled) == 1
+    event = registry.list_recent_events(thread_key=handle.thread_key, limit=1)[0]
+    assert event.outcome == "agent_started"
+    assert event.detail["ack_mode"] == "brief"
+    assert event.detail["ack_sent"] is True
+    assert event.detail["ack_success"] is False
+    assert event.detail["ack_error"] == "send failed signature=<redacted>"
+    assert "deadbeef" not in json.dumps(event.detail)
+
+
+@pytest.mark.asyncio
+async def test_direct_policy_does_not_send_ack_even_if_handle_has_ack_mode(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", policy="direct", ack_mode="debug")
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+
+    outcome, detail = await adapter.dispatch_event(handle, {"payload": {}}, _fields(handle))
+
+    assert outcome == "direct_delivered"
+    assert "ack_sent" not in detail
+    assert len(target.sent) == 1
+    assert "async-thread event received" not in target.sent[0][1]
 
 
 @pytest.mark.asyncio
@@ -247,6 +341,8 @@ async def test_dispatch_success_paths_log_metadata_from_webhook(tmp_path):
     assert events["evt_active"].outcome == "queued_active_session"
     assert events["evt_direct"].outcome == "direct_delivered"
     idle_detail = events["evt_idle"].detail
+    assert idle_detail["ack_mode"] == "none"
+    assert idle_detail["ack_sent"] is False
     assert idle_detail["handle_message_called"] is True
     assert idle_detail["handle_message_returned"] is True
     assert idle_detail["active_session"] is False
@@ -256,6 +352,8 @@ async def test_dispatch_success_paths_log_metadata_from_webhook(tmp_path):
     assert len(idle_detail["session_key_hash"]) == 12
 
     active_detail = events["evt_active"].detail
+    assert active_detail["ack_mode"] == "none"
+    assert active_detail["ack_sent"] is False
     assert active_detail["active_session"] is True
     assert active_detail["queued"] is True
     assert active_detail["handle_message_called"] is False
