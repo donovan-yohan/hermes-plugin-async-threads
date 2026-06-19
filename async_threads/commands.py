@@ -197,8 +197,17 @@ def _format_event_row(event: Any) -> str:
     return (
         f"- {event.created_at} `{event.thread_key or '-'}` "
         f"{event.producer_id}/{event.event_type} "
-        f"id={_short_event_id(event.event_id)} outcome=`{event.outcome}`{summary_text}{detail_text}"
+        f"id={_short_event_id(event.event_id)} outcome=`{_display_outcome(event.outcome)}`{summary_text}{detail_text}"
     )
+
+
+def _display_outcome(outcome: str) -> str:
+    text = str(outcome or "")
+    return {
+        "accepted": "agent_started (legacy accepted)",
+        "queued": "queued_active_session (legacy queued)",
+        "delivered": "direct_delivered (legacy delivered)",
+    }.get(text, text or "-")
 
 
 def _format_event_detail(detail: dict[str, Any]) -> str:

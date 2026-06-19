@@ -104,7 +104,7 @@ async def test_dispatch_idle_injects_message_into_target_adapter(tmp_path):
         _fields(handle),
     )
 
-    assert outcome == "accepted"
+    assert outcome == "agent_started"
     assert detail == {
         "active_session": False,
         "gateway_runner_exists": True,
@@ -140,7 +140,7 @@ async def test_dispatch_active_session_queues_instead_of_interrupting(tmp_path):
 
     outcome, detail = await adapter.dispatch_event(handle, {"payload": {}}, _fields(handle))
 
-    assert outcome == "queued"
+    assert outcome == "queued_active_session"
     assert detail["active_session"] is True
     assert detail["queued"] is True
     assert detail["handle_message_called"] is False
@@ -163,7 +163,7 @@ async def test_direct_policy_sends_without_agent(tmp_path):
 
     outcome, detail = await adapter.dispatch_event(handle, {"payload": {}}, _fields(handle))
 
-    assert outcome == "delivered"
+    assert outcome == "direct_delivered"
     assert detail["direct_send_success"] is True
     assert detail["target_adapter_exists"] is True
     assert target.handled == []
@@ -237,7 +237,15 @@ async def test_dispatch_success_paths_log_metadata_from_webhook(tmp_path):
     direct_response = await adapter._handle_event(FakeRequest(_event_body(direct, "evt_direct"), direct.secret))
 
     assert [idle_response.status, active_response.status, direct_response.status] == [202, 202, 200]
+    assert [json.loads(response.text)["status"] for response in [idle_response, active_response, direct_response]] == [
+        "accepted",
+        "queued",
+        "delivered",
+    ]
     events = {event.event_id: event for event in registry.list_recent_events(limit=10)}
+    assert events["evt_idle"].outcome == "agent_started"
+    assert events["evt_active"].outcome == "queued_active_session"
+    assert events["evt_direct"].outcome == "direct_delivered"
     idle_detail = events["evt_idle"].detail
     assert idle_detail["handle_message_called"] is True
     assert idle_detail["handle_message_returned"] is True

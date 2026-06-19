@@ -61,6 +61,14 @@ def registry_from_config(config: Any) -> AsyncThreadRegistry:
     return AsyncThreadRegistry(registry_path_from_config(config))
 
 
+def _producer_status(outcome: str) -> str:
+    return {
+        "agent_started": "accepted",
+        "queued_active_session": "queued",
+        "direct_delivered": "delivered",
+    }.get(outcome, outcome)
+
+
 class AsyncThreadsAdapter:  # subclassed dynamically to keep imports test-friendly
     pass
 
@@ -227,8 +235,8 @@ def _build_adapter_base():
                     summary=fields["summary"],
                     detail=detail,
                 )
-                status = 200 if outcome == "delivered" else 202
-                return web.json_response({"status": outcome, "threadKey": handle.thread_key}, status=status)
+                status = 200 if outcome == "direct_delivered" else 202
+                return web.json_response({"status": _producer_status(outcome), "threadKey": handle.thread_key}, status=status)
             except EventValidationError as exc:
                 return web.json_response({"error": str(exc)}, status=400)
             except Exception as exc:  # noqa: BLE001
@@ -276,7 +284,7 @@ def _build_adapter_base():
                 if not detail["direct_send_success"]:
                     error = getattr(result, "error", None) or "direct delivery failed"
                     raise DispatchEventError(str(error), detail=detail)
-                return "delivered", detail
+                return "direct_delivered", detail
 
             event = MessageEvent(
                 text=text,
@@ -314,14 +322,14 @@ def _build_adapter_base():
                     merge_text=True,
                 )
                 detail["queued"] = True
-                return "queued", detail
+                return "queued_active_session", detail
             detail["handle_message_called"] = True
             try:
                 await target_adapter.handle_message(event)
             except Exception as exc:
                 raise DispatchEventError(str(exc), detail=detail) from exc
             detail["handle_message_returned"] = True
-            return "accepted", detail
+            return "agent_started", detail
 
     return _AsyncThreadsAdapter
 
