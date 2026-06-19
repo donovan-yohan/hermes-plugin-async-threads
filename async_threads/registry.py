@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -24,6 +25,8 @@ SAFE_DETAIL_KEYS = {
     "exception_message",
     "gateway_runner_exists",
     "handle_enabled",
+    "handle_message_called",
+    "handle_message_returned",
     "policy",
     "queued",
     "session_key_hash",
@@ -430,6 +433,12 @@ def sanitize_event_detail(detail: dict[str, Any] | None) -> dict[str, Any]:
     return sanitized
 
 
+def safe_session_key_hash(session_key: str | None) -> str:
+    if not session_key:
+        return ""
+    return hashlib.sha256(session_key.encode("utf-8")).hexdigest()[:12]
+
+
 def _sanitize_detail_value(value: Any) -> str | int | float | bool | None:
     if value is None or isinstance(value, (dict, list, tuple, set)):
         return None
@@ -445,9 +454,19 @@ def _sanitize_detail_value(value: Any) -> str | int | float | bool | None:
 
 def _redact_detail_text(value: str) -> str:
     text = re.sub(
-        r"(?i)\b(authorization|cookie|signature)\b\s*[:= ]\s*[^,;\r\n]+",
+        r"(?i)\b(session[-_]?key|sessionKey)\b\s*[:= ]\s*[^,;\r\n]+",
         lambda match: f"{match.group(1)}=<redacted>",
         value,
+    )
+    text = re.sub(
+        r"(?i)\b(authorization|cookie|signature)\b\s*[:= ]\s*[^,;\r\n]+",
+        lambda match: f"{match.group(1)}=<redacted>",
+        text,
+    )
+    text = re.sub(
+        r"\bagent:[A-Za-z0-9._:-]+",
+        "agent:<redacted>",
+        text,
     )
     text = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+", "Bearer <redacted>", text)
     text = re.sub(

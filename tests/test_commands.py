@@ -77,6 +77,7 @@ def test_listener_management_commands_are_owner_scoped(tmp_path):
         source={"platform": "discord", "chat_id": "c", "chat_type": "channel", "thread_id": "t"},
         producer_id="relay",
         owner_user_id="u1",
+        session_key="agent:secret-session-key",
     )
     other = registry.create_handle(
         source={"platform": "discord", "chat_id": "c2", "chat_type": "channel", "thread_id": "t2"},
@@ -89,7 +90,10 @@ def test_listener_management_commands_are_owner_scoped(tmp_path):
     assert other.thread_key not in listing
 
     assert _cmd_list(registry, owner_user_id="") == "no async-thread listeners for this user. create one with `/ath listen <producer>`."
-    assert "producer: `relay`" in _cmd_inspect(registry, mine.thread_key, owner_user_id="u1")
+    inspected_mine = _cmd_inspect(registry, mine.thread_key, owner_user_id="u1")
+    assert "producer: `relay`" in inspected_mine
+    assert "sessionKey: present hash=`" in inspected_mine
+    assert "agent:secret-session-key" not in inspected_mine
     assert _cmd_inspect(registry, other.thread_key, owner_user_id="u1") == "async-thread listener not found."
     assert _cmd_set_enabled(registry, other.thread_key, False, "paused", owner_user_id="u1") == "async-thread listener not found."
     other_after_denied = registry.get_handle(other.thread_key)
@@ -120,7 +124,20 @@ def test_status_events_and_inspect_show_owner_scoped_diagnostics(tmp_path):
         thread_key=mine.thread_key,
         event_type="relay.session.pr_opened",
         outcome="accepted",
-        summary="PR opened token=supersecret Bearer abc123 and ready for review",
+        summary="PR opened token=supersecret Bearer abc123 for agent:main:discord:channel:c:t and ready for review",
+        detail={
+            "target_platform": "discord",
+            "gateway_runner_exists": True,
+            "target_adapter_exists": True,
+            "policy": "agent_queue",
+            "session_key_present": True,
+            "session_key_hash": "abc123def456",
+            "active_session": False,
+            "queued": False,
+            "handle_message_called": True,
+            "handle_message_returned": True,
+            "secret": "not-stored",
+        },
     )
     registry.log_event(
         producer_id="relay",
@@ -163,6 +180,14 @@ def test_status_events_and_inspect_show_owner_scoped_diagnostics(tmp_path):
     assert "…23456789" in events
     assert "token=<redacted>" in events
     assert "Bearer <redacted>" in events
+    assert "target_platform=discord" in events
+    assert "gateway_runner_exists=True" in events
+    assert "target_adapter_exists=True" in events
+    assert "session_key_hash=abc123def456" in events
+    assert "handle_message_called=True" in events
+    assert "not-stored" not in events
+    assert "agent:main:discord:channel:c:t" not in events
+    assert "agent:<redacted>" in events
     assert "supersecret" not in events
     assert "secret=bad" not in events
     assert "should not echo" not in events

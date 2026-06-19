@@ -217,7 +217,7 @@ def test_sanitize_event_detail_allowlists_and_redacts_safe_metadata():
             "target_adapter_exists": True,
             "direct_send_success": False,
             "exception_class": "RuntimeError",
-            "exception_message": "authorization: Basic abc123; signature sha256=deadbeef; cookie: sessionid=abc123; other=x",
+            "exception_message": "authorization: Basic abc123; signature sha256=deadbeef; cookie: sessionid=abc123; other=x; sessionKey=agent:secret-session-key",
             "error": "secret=value api_key=abc x-api-key: def token=ghi Bearer bearer-token",
             "secret": "drop",
             "token": "drop",
@@ -232,7 +232,7 @@ def test_sanitize_event_detail_allowlists_and_redacts_safe_metadata():
         "direct_send_success": False,
         "error": "secret=<redacted> api_key=<redacted> x-api-key=<redacted> token=<redacted> Bearer <redacted>",
         "exception_class": "RuntimeError",
-        "exception_message": "authorization=<redacted>; signature=<redacted>; cookie=<redacted>; other=x",
+        "exception_message": "authorization=<redacted>; signature=<redacted>; cookie=<redacted>; other=x; sessionKey=<redacted>",
         "policy": "agent_queue",
         "queued": False,
         "session_key_present": True,
@@ -243,10 +243,17 @@ def test_sanitize_event_detail_allowlists_and_redacts_safe_metadata():
 
 def test_sanitize_event_detail_bounds_regex_input_before_output_truncation():
     detail = sanitize_event_detail(
-        {"exception_message": ("prefix " * 20) + "authorization: Basic abc123 signature sha256=deadbeef"}
+        {"exception_message": ("prefix " * 20) + "authorization: Basic abc123 signature sha256=deadbeef KeyError('agent:main:discord:channel:c:t')"}
     )
 
     assert len(detail["exception_message"]) <= 200
     assert "abc123" not in detail["exception_message"]
     assert "deadbeef" not in detail["exception_message"]
+    assert "agent:main:discord:channel:c:t" not in detail["exception_message"]
     assert "authorization=<redacted>" in detail["exception_message"]
+
+
+def test_sanitize_event_detail_redacts_raw_session_key_shapes():
+    detail = sanitize_event_detail({"exception_message": "KeyError('agent:main:discord:channel:c:t')"})
+
+    assert detail["exception_message"] == "KeyError('agent:<redacted>')"
