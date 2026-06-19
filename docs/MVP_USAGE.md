@@ -48,7 +48,7 @@ Acknowledgements are opt-in for `agent_queue` listeners:
 /ath listen relay --events relay.session.pr_opened --ack none   # default, silent
 /ath listen relay --events relay.session.pr_opened --ack brief  # one compact visible notice
 /ath listen relay --events relay.session.pr_opened --ack debug  # safe diagnostic notice
-/ath listen relay --events relay.lane.started,relay.lane.progress --debounce 45  # coalesce routine lane noise
+/ath listen relay --events relay.lane.started,relay.lane.progress,relay.lane.finished,relay.lane.failed --debounce 45  # coalesce routine lane noise while letting terminal states through
 ```
 
 `--ack` is ignored for `--policy direct`; direct delivery is already visible when it succeeds.
@@ -136,10 +136,10 @@ For profile/background-agent producers, prefer compact state-transition payloads
 
 Recommended phase payloads:
 
-- `relay.lane.started`: `profile`, `lane`, `issue`/`pr`, optional `pid` or `delegation_id`, and `log_path`.
-- `relay.lane.progress`: one meaningful milestone; avoid heartbeat spam. Producers should cap this to 1–2 routine progress events per lane before a terminal state.
-- `relay.lane.finished`: `verdict`, exact `head_sha` when relevant, PR/comment URLs, `changed_files`, `verification`, and `log_path`.
-- `relay.lane.failed`: failure class, sanitized error summary, `log_path`, and retryability hint.
+- `relay.lane.started`: subject fields `profile`, `lane`, `issue`/`pr`, optional `pid` or `delegation_id`, and `log_path`.
+- `relay.lane.progress`: one meaningful milestone in payload; avoid heartbeat spam. Producers should cap this to 1–2 routine progress events per lane before a terminal state.
+- `relay.lane.finished`: subject fields `head_sha`/PR/comment URLs when relevant, plus payload fields such as `verdict`, `changed_files`, `verification`, and telemetry.
+- `relay.lane.failed`: subject `log_path` plus payload fields such as failure class, sanitized error summary, and retryability hint.
 
 For listeners with `--debounce`, multiple same-thread `started`/routine `progress` events become one `async_threads.coalesced` digest payload. Terminal/high-priority events (`finished`, `failed`, `blocked`, `needs_attention`, explicit `tailMode: debug`) bypass debounce and flush any pending routine events immediately so failures and completion states are not hidden behind the timer.
 
@@ -150,6 +150,82 @@ For listeners with `--debounce`, multiple same-thread `started`/routine `progres
 - `debug`: include a redacted tail capped to a hard debug limit; use only for explicit debugging.
 
 Large transcripts and oversized payload strings should be saved to logs and referenced by `log_path`, not injected into the conversation. In compact/none modes, oversized string fields are summarized with counts; `debug` includes only capped redacted text.
+
+### Profile-lane helper
+
+For background profile lanes, use the producer helper instead of hand-rolled JSON/HMAC glue when possible. The recommended `run profile lane -> emit ATH` flow is:
+
+1. create or reuse an `/ath listen` handle for the origin thread;
+2. start the background lane under the intended Hermes/profile process;
+3. emit `relay.lane.started`, sparse meaningful `relay.lane.progress`, and one terminal `relay.lane.finished` or `relay.lane.failed` event;
+4. keep bulky transcripts in the lane log referenced by `log_path`, not in ATH payload text.
+
+Use `/ath status` to copy the live registry path for the profile you are running in. Example CLI usage:
+
+```bash
+python scripts/ath-profile-lane.py \
+  --registry ~/.hermes/profiles/ebi/data/async-threads/registry.sqlite3 \
+  --thread-key ath_... \
+  --type relay.lane.started \
+  --profile ebi \
+  --lane issue19-docs \
+  --issue '#19' \
+  --log-path /tmp/ath/issue19.log \
+  --summary 'issue #19 lane started'
+
+python scripts/ath-profile-lane.py \
+  --registry ~/.hermes/profiles/ebi/data/async-threads/registry.sqlite3 \
+  --thread-key ath_... \
+  --type relay.lane.finished \
+  --profile ebi \
+  --lane issue19-docs \
+  --issue '#19' \
+  --pr '23' \
+  --head abc1234 \
+  --log-path /tmp/ath/issue19.log \
+  --telemetry-json '{"runtime_seconds": 123, "tokens": 4567}' \
+  --payload-json '{"verification": "tests passed"}' \
+  --summary 'issue #19 lane finished'
+```
+
+The Python API is the same seam for non-shell producers:
+
+```python
+from async_threads.profile_lane import build_profile_lane_event, emit_signed_event
+
+event = build_profile_lane_event(
+    thread_key="ath_...",
+    producer_id="relay-ath-dev",
+    event_type="relay.lane.progress",
+    profile="ebi",
+    lane="issue19-docs",
+    summary="tests are running",
+    telemetry={"runtime_seconds": 42, "tokens": 1200},
+    payload={"verification": "pytest in progress"},
+    log_path="/tmp/ath/issue19.log",
+)
+emit_signed_event(url="http://127.0.0.1:8765/async-threads/v1/events", event=event, secret=secret)
+```
+
+Sample phase payloads:
+
+```json
+{"eventType":"relay.lane.started","tailMode":"compact","subject":{"profile":"ebi","lane":"issue19-docs","issue":"#19","log_path":"/tmp/ath/issue19.log"},"payload":{"phase":"started"}}
+```
+
+```json
+{"eventType":"relay.lane.progress","tailMode":"compact","subject":{"profile":"ebi","lane":"issue19-docs","issue":"#19","log_path":"/tmp/ath/issue19.log"},"payload":{"phase":"progress","milestone":"tests-running","telemetry":{"runtime_seconds":42,"tokens":1200}}}
+```
+
+```json
+{"eventType":"relay.lane.finished","tailMode":"compact","subject":{"profile":"ebi","lane":"issue19-docs","issue":"#19","pr":"23","head":"abc1234","log_path":"/tmp/ath/issue19.log","status":"passed"},"payload":{"phase":"finished","verification":"49 passed","telemetry":{"runtime_seconds":123,"tokens":4567}}}
+```
+
+```json
+{"eventType":"relay.lane.failed","tailMode":"compact","subject":{"profile":"ebi","lane":"issue19-docs","issue":"#19","log_path":"/tmp/ath/issue19.log","status":"failed"},"payload":{"phase":"failed","failure_class":"test_failure","retryable":true,"telemetry":{"runtime_seconds":80,"tokens":2300}}}
+```
+
+The helper can also run without registry access by passing `--producer-id` and setting `ATH_SECRET` (or another env var via `--secret-env`). It prints the receiver response, never the HMAC secret. Cron/watchers are fallback plumbing only; the happy path is profile/background-lane execution plus compact ATH events.
 
 Sign the exact request body:
 
