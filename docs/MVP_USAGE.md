@@ -62,6 +62,8 @@ Management and diagnostics commands:
 
 `/ath status` prints the receiver URL, live registry path, listener count, and recent event count for the current user. `/ath events` shows compact recent event rows with redacted summaries for authenticated events; rejected events do not echo producer-supplied summaries. Secrets, HMACs, tokens, cookies, raw credentials, and full payload bodies are not printed.
 
+The registry schema stores optional `event_log.detail_json` for structured diagnostics. Details are allowlisted and sanitized before persistence; unsafe keys such as `secret`, `token`, `authorization`, `cookie`, `signature`, `payload`, `body`, `raw`, and credential-like fields are omitted or redacted.
+
 ## Event shape
 
 ```json

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 import secrets
 import sqlite3
 import time
@@ -12,7 +14,27 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+SAFE_DETAIL_KEYS = {
+    "active_session",
+    "direct_send_success",
+    "error",
+    "exception_class",
+    "exception_message",
+    "gateway_runner_exists",
+    "handle_enabled",
+    "policy",
+    "queued",
+    "session_key_hash",
+    "session_key_present",
+    "target_adapter_exists",
+    "target_platform",
+}
+UNSAFE_DETAIL_KEY_RE = re.compile(
+    r"secret|token|authorization|cookie|signature|password|credential|payload|body|headers|raw|env",
+    re.IGNORECASE,
+)
 
 
 def utc_now() -> str:
@@ -58,6 +80,7 @@ class AsyncThreadEventLog:
     outcome: str
     summary: str
     created_at: str
+    detail: dict[str, Any]
 
 
 class AsyncThreadRegistry:
@@ -138,6 +161,7 @@ class AsyncThreadRegistry:
                     event_type text,
                     outcome text not null,
                     summary text,
+                    detail_json text not null default '{}',
                     created_at text not null
                 );
 
@@ -145,10 +169,19 @@ class AsyncThreadRegistry:
                     on event_log(thread_key);
                 """
             )
+            self._migrate_schema(conn)
             conn.execute(
                 "insert or replace into meta(key, value) values('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
+
+    def _migrate_schema(self, conn: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute("pragma table_info(event_log)").fetchall()
+        }
+        if "detail_json" not in columns:
+            conn.execute("alter table event_log add column detail_json text not null default '{}'")
 
     def create_handle(
         self,
@@ -257,7 +290,7 @@ class AsyncThreadRegistry:
         sql, params = _event_query(
             """
             select e.id, e.producer_id, e.event_id, e.thread_key, e.event_type,
-                   e.outcome, e.summary, e.created_at
+                   e.outcome, e.summary, e.detail_json, e.created_at
             """,
             thread_key=thread_key,
             owner_user_id=owner_user_id,
@@ -308,12 +341,14 @@ class AsyncThreadRegistry:
         thread_key: str | None = None,
         event_type: str | None = None,
         summary: str | None = None,
+        detail: dict[str, Any] | None = None,
     ) -> None:
+        detail_json = json.dumps(sanitize_event_detail(detail), sort_keys=True, separators=(",", ":"))
         with self._connect() as conn:
             conn.execute(
                 """
-                insert into event_log(producer_id, event_id, thread_key, event_type, outcome, summary, created_at)
-                values (?, ?, ?, ?, ?, ?, ?)
+                insert into event_log(producer_id, event_id, thread_key, event_type, outcome, summary, detail_json, created_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     producer_id,
@@ -322,6 +357,7 @@ class AsyncThreadRegistry:
                     event_type,
                     outcome,
                     (summary or "")[:500],
+                    detail_json,
                     utc_now(),
                 ),
             )
@@ -355,6 +391,7 @@ def _row_to_event(row: sqlite3.Row) -> AsyncThreadEventLog:
         outcome=row["outcome"],
         summary=row["summary"] or "",
         created_at=row["created_at"],
+        detail=_parse_detail_json(row["detail_json"]),
     )
 
 
@@ -377,6 +414,58 @@ def _event_query(
     if clauses:
         sql += " where " + " and ".join(clauses)
     return sql, params
+
+
+def sanitize_event_detail(detail: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(detail, dict):
+        return {}
+    sanitized: dict[str, Any] = {}
+    for key, value in detail.items():
+        key_text = str(key)
+        if key_text not in SAFE_DETAIL_KEYS or UNSAFE_DETAIL_KEY_RE.search(key_text):
+            continue
+        cleaned = _sanitize_detail_value(value)
+        if cleaned is not None:
+            sanitized[key_text] = cleaned
+    return sanitized
+
+
+def _sanitize_detail_value(value: Any) -> str | int | float | bool | None:
+    if value is None or isinstance(value, (dict, list, tuple, set)):
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return round(value, 6) if math.isfinite(value) else None
+    text = _redact_detail_text(str(value)[:1000])[:200]
+    return text
+
+
+def _redact_detail_text(value: str) -> str:
+    text = re.sub(
+        r"(?i)\b(authorization|cookie|signature)\b\s*[:= ]\s*[^,;\r\n]+",
+        lambda match: f"{match.group(1)}=<redacted>",
+        value,
+    )
+    text = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+", "Bearer <redacted>", text)
+    text = re.sub(
+        r"(?i)\b(x[-_]?api[-_]?key|api[-_]?key|secret|token|password|credential)\b\s*[:=]\s*\S+",
+        lambda match: f"{match.group(1)}=<redacted>",
+        text,
+    )
+    return text
+
+
+def _parse_detail_json(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _clean_token(value: str, *, default: str) -> str:

@@ -198,3 +198,16 @@ async def test_auth_failures_use_generic_unauthorized_response(tmp_path):
 
     assert [response.status for response in responses] == [401] * 5
     assert [json.loads(response.text)["error"] for response in responses] == ["invalid signature"] * 5
+    events = registry.list_recent_events(thread_key=handle.thread_key, limit=10)
+    detail_by_event_id = {event.event_id: event.detail for event in events}
+    assert detail_by_event_id["evt_auth_3"] == {
+        "handle_enabled": True,
+        "policy": "agent_queue",
+        "target_platform": "discord",
+    }
+    assert detail_by_event_id["evt_auth_4"] == {
+        "handle_enabled": True,
+        "policy": "agent_queue",
+        "target_platform": "discord",
+    }
+    assert detail_by_event_id["evt_auth_5"] == {"handle_enabled": False}

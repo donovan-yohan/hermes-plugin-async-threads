@@ -134,6 +134,7 @@ def _build_adapter_base():
                         event_type=fields["event_type"],
                         outcome="rejected_missing_or_disabled_handle",
                         summary=fields["summary"],
+                        detail={"handle_enabled": False},
                     )
                     return web.json_response({"error": "invalid signature"}, status=401)
                 if handle.producer_id != fields["producer_id"]:
@@ -144,6 +145,7 @@ def _build_adapter_base():
                         event_type=fields["event_type"],
                         outcome="rejected_producer_scope",
                         summary=fields["summary"],
+                        detail={"handle_enabled": handle.enabled, "policy": handle.policy, "target_platform": handle.platform},
                     )
                     return web.json_response({"error": "invalid signature"}, status=401)
                 if handle.allowed_event_types and fields["event_type"] not in handle.allowed_event_types:
@@ -154,6 +156,7 @@ def _build_adapter_base():
                         event_type=fields["event_type"],
                         outcome="rejected_event_type",
                         summary=fields["summary"],
+                        detail={"handle_enabled": handle.enabled, "policy": handle.policy, "target_platform": handle.platform},
                     )
                     return web.json_response({"error": "invalid signature"}, status=401)
                 if not verify_hmac_signature(raw, handle.secret, signature_header(request.headers)):
@@ -164,6 +167,7 @@ def _build_adapter_base():
                         event_type=fields["event_type"],
                         outcome="rejected_signature",
                         summary=fields["summary"],
+                        detail={"handle_enabled": handle.enabled, "policy": handle.policy, "target_platform": handle.platform},
                     )
                     return web.json_response({"error": "invalid signature"}, status=401)
                 if not self._registry.mark_seen(
@@ -178,12 +182,13 @@ def _build_adapter_base():
                         event_type=fields["event_type"],
                         outcome="duplicate",
                         summary=fields["summary"],
+                        detail={"policy": handle.policy, "target_platform": handle.platform},
                     )
                     return web.json_response({"status": "duplicate", "threadKey": handle.thread_key})
 
                 try:
                     outcome = await self.dispatch_event(handle, data, fields)
-                except Exception:
+                except Exception as exc:
                     self._registry.forget_seen(
                         producer_id=fields["producer_id"],
                         event_id=fields["event_id"],
@@ -195,6 +200,12 @@ def _build_adapter_base():
                         event_type=fields["event_type"],
                         outcome="dispatch_failed",
                         summary=fields["summary"],
+                        detail={
+                            "policy": handle.policy,
+                            "target_platform": handle.platform,
+                            "exception_class": type(exc).__name__,
+                            "exception_message": str(exc),
+                        },
                     )
                     raise
                 self._registry.log_event(
@@ -204,6 +215,7 @@ def _build_adapter_base():
                     event_type=fields["event_type"],
                     outcome=outcome,
                     summary=fields["summary"],
+                    detail={"policy": handle.policy, "target_platform": handle.platform},
                 )
                 status = 200 if outcome == "delivered" else 202
                 return web.json_response({"status": outcome, "threadKey": handle.thread_key}, status=status)
