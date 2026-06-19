@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from .privacy import redact_metadata_text, redact_secret_text, safe_event_id
+
 
 SCHEMA_VERSION = 3
 
@@ -369,12 +371,12 @@ class AsyncThreadRegistry:
                 values (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    producer_id,
-                    event_id,
-                    thread_key,
-                    event_type,
+                    redact_metadata_text(producer_id),
+                    safe_event_id(event_id),
+                    redact_metadata_text(thread_key) if thread_key else thread_key,
+                    redact_metadata_text(event_type) if event_type else event_type,
                     outcome,
-                    (summary or "")[:500],
+                    redact_secret_text(summary or "", max_input_chars=1000, max_output_chars=500),
                     detail_json,
                     utc_now(),
                 ),
@@ -469,28 +471,7 @@ def _sanitize_detail_value(value: Any) -> str | int | float | bool | None:
 
 
 def _redact_detail_text(value: str) -> str:
-    text = re.sub(
-        r"(?i)\b(session[-_]?key|sessionKey)\b\s*[:= ]\s*[^,;\r\n]+",
-        lambda match: f"{match.group(1)}=<redacted>",
-        value,
-    )
-    text = re.sub(
-        r"(?i)\b(authorization|cookie|signature)\b\s*[:= ]\s*[^,;\r\n]+",
-        lambda match: f"{match.group(1)}=<redacted>",
-        text,
-    )
-    text = re.sub(
-        r"\bagent:[A-Za-z0-9._:-]+",
-        "agent:<redacted>",
-        text,
-    )
-    text = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+", "Bearer <redacted>", text)
-    text = re.sub(
-        r"(?i)\b(x[-_]?api[-_]?key|api[-_]?key|secret|token|password|credential)\b\s*[:=]\s*\S+",
-        lambda match: f"{match.group(1)}=<redacted>",
-        text,
-    )
-    return text
+    return redact_secret_text(value, max_input_chars=1000, max_output_chars=200)
 
 
 def _parse_detail_json(value: str | None) -> dict[str, Any]:

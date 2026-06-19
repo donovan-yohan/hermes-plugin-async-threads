@@ -110,6 +110,7 @@ X-Hermes-Signature-256: sha256=<hmac_sha256_hex(body, secret)>
 ## Security notes
 
 - Payload text is rendered under an untrusted-data boundary before entering the agent session.
+- Secret-shaped text in event summaries, subjects, payloads, visible acknowledgements, event diagnostics, and stored event summaries is redacted before those surfaces are rendered or persisted. HMAC verification still signs the exact raw request body; redaction only applies after validation to derived operator/agent-facing text.
 - The MVP stores per-handle HMAC secrets in plugin-local SQLite because the receiver needs to validate inbound events.
 - `/ath listen` uses the `pre_gateway_dispatch` hook to capture the current thread source. That hook runs before normal gateway auth, so the implementation explicitly defers to `_is_user_authorized(source)` when available.
 - This is gateway-local: the receiver assumes the target platform adapter is connected in the same gateway process/profile.
