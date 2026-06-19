@@ -54,7 +54,7 @@ def test_registry_creates_lists_revokes_and_dedupes(tmp_path: Path):
         thread_key=handle.thread_key,
         event_type="relay.session.pr_opened",
         outcome="accepted",
-        summary="PR opened with a long summary that remains diagnostic only",
+        summary="PR opened token=supersecret Bearer bearer-secret with a long summary that remains diagnostic only",
         detail={
             "target_platform": "discord",
             "policy": "agent_queue",
@@ -82,6 +82,8 @@ def test_registry_creates_lists_revokes_and_dedupes(tmp_path: Path):
     assert len(recent) == 1
     assert recent[0].event_id == "evt1"
     assert recent[0].summary.startswith("PR opened")
+    assert "supersecret" not in recent[0].summary
+    assert "bearer-secret" not in recent[0].summary
     assert recent[0].detail == {
         "active_session": False,
         "exception_message": "token=<redacted> Bearer <redacted> should redact",
@@ -92,7 +94,10 @@ def test_registry_creates_lists_revokes_and_dedupes(tmp_path: Path):
     }
     with reg._connect() as conn:
         detail_json = conn.execute("select detail_json from event_log where event_id = 'evt1'").fetchone()[0]
+        stored_summary = conn.execute("select summary from event_log where event_id = 'evt1'").fetchone()[0]
     assert detail_json == json.dumps(recent[0].detail, sort_keys=True, separators=(",", ":"))
+    assert "supersecret" not in stored_summary
+    assert "bearer-secret" not in stored_summary
     assert "do-not-store" not in detail_json
     assert "signature_valid" not in detail_json
 

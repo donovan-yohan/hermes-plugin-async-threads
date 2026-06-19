@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any, Mapping
 
+from .privacy import redact_metadata_text, safe_event_id
 from .registry import AsyncThreadHandle, AsyncThreadRegistry, safe_session_key_hash
 from .rendering import render_event_message
 from .security import (
@@ -78,8 +79,8 @@ def _ack_notice_text(
     thread_key: str,
     outcome: str,
 ) -> str:
-    producer = _safe_ack_token(producer_id)
-    event = _safe_ack_token(event_type)
+    producer = _safe_ack_token(redact_metadata_text(producer_id))
+    event = _safe_ack_token(redact_metadata_text(event_type))
     if ack_mode == "debug":
         return (
             "async-thread event received\n"
@@ -98,7 +99,7 @@ def _safe_ack_token(value: str) -> str:
 
 
 def _short_ack_id(event_id: str) -> str:
-    text = _safe_ack_token(event_id)
+    text = safe_event_id(event_id)
     return f"…{text[-8:]}" if len(text) > 8 else text
 
 
@@ -319,18 +320,19 @@ def _build_adapter_base():
                     raise DispatchEventError(str(error), detail=detail)
                 return "direct_delivered", detail
 
+            safe_message_id = safe_event_id(fields["event_id"])
             event = MessageEvent(
                 text=text,
                 message_type=MessageType.TEXT,
                 source=source,
                 raw_message={
                     "async_thread_event": True,
-                    "eventId": fields["event_id"],
-                    "eventType": fields["event_type"],
-                    "producerId": fields["producer_id"],
+                    "eventId": safe_message_id,
+                    "eventType": redact_metadata_text(fields["event_type"]),
+                    "producerId": redact_metadata_text(fields["producer_id"]),
                     "threadKey": handle.thread_key,
                 },
-                message_id=fields["event_id"],
+                message_id=safe_message_id,
                 internal=True,
             )
             session_key = handle.session_key or build_session_key(

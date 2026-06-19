@@ -9,6 +9,7 @@ import pytest
 
 from async_threads.adapter import AsyncThreadsAdapter
 from async_threads.registry import AsyncThreadRegistry
+from async_threads.rendering import render_event_message
 from gateway.config import Platform, PlatformConfig
 from gateway.platform_registry import PlatformEntry, platform_registry
 from gateway.session import SessionSource, build_session_key
@@ -86,6 +87,51 @@ def _event_body(handle, event_id="evt1"):
             "summary": "PR opened",
         }
     ).encode()
+
+
+def test_render_event_message_redacts_hostile_payload_before_prompt_text():
+    text = render_event_message(
+        {
+            "subject": {
+                "repo": "donovan-yohan/hermes-plugin-async-threads",
+                "api_key": "subject-key",
+                "note": "Authorization: Bearer subject-token",
+            },
+            "payload": {
+                "tail": (
+                    "Bearer tail-token\n"
+                    "Basic basic-token\n"
+                    "api_key=tail-key\n"
+                    "x-api-key: tail-x-key\n"
+                    "Cookie: sid=tail-cookie\n"
+                    "X-Hermes-Signature-256: sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
+                    "sessionKey=agent:main:discord:channel:c:t"
+                ),
+                "nested": {"token": "nested-token", "safe": "ok"},
+            },
+        },
+        event_type="relay.Bearer.eventtype-secret",
+        producer_id="relay-api_key=producer-secret",
+        summary="summary has Bearer summary-token and api_key=summary-key",
+    )
+
+    for sentinel in [
+        "summary-token",
+        "summary-key",
+        "subject-key",
+        "subject-token",
+        "tail-token",
+        "basic-token",
+        "tail-key",
+        "tail-x-key",
+        "tail-cookie",
+        "0123456789abcdef",
+        "agent:main:discord:channel:c:t",
+        "nested-token",
+    ]:
+        assert sentinel not in text
+    assert "<redacted>" in text
+    assert "ok" in text
 
 
 @pytest.mark.asyncio
@@ -217,11 +263,72 @@ async def test_agent_queue_debug_ack_uses_only_safe_fields(tmp_path):
     assert detail["ack_success"] is True
     ack = target.sent[0][1]
     assert "async-thread event received" in ack
-    assert "eventId: `…23456789`" in ack
+    assert "eventId: `…23456789`" not in ack
+    assert "redacted:" not in ack
     assert f"threadKey: `{handle.thread_key}`" in ack
     assert "initialOutcome: `agent_started`" in ack
     assert "token" not in ack.lower()
     assert "do-not-print" not in ack
+
+
+@pytest.mark.asyncio
+async def test_webhook_hostile_payload_is_redacted_before_prompt_ack_registry_and_logs(tmp_path, caplog):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", ack_mode="debug")
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+    body = json.dumps(
+        {
+            "version": "async-thread-event/v1",
+            "eventId": "evt_Bearer_event_token_tailsecret",
+            "eventType": "relay.session.pr_opened",
+            "producer": {"id": handle.producer_id},
+            "occurredAt": time.time(),
+            "asyncThread": {"threadKey": handle.thread_key},
+            "summary": "Bearer summary-token api_key=summary-key Cookie: sid=summary-cookie",
+            "subject": {"api_key": "subject-key", "safe": "repo"},
+            "payload": {
+                "tail": (
+                    "Basic basic-token "
+                    "X-Hermes-Signature-256: sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef "
+                    "sessionKey=agent:main:discord:channel:c:t"
+                ),
+                "nested": {"token": "nested-token", "safe": "ok"},
+            },
+        }
+    ).encode()
+
+    with caplog.at_level("ERROR", logger="async_threads"):
+        response = await adapter._handle_event(FakeRequest(body, handle.secret))
+
+    assert response.status == 202
+    prompt_text = target.handled[0].text
+    ack_text = target.sent[0][1]
+    event = registry.list_recent_events(thread_key=handle.thread_key, limit=1)[0]
+    with registry._connect() as conn:
+        row = conn.execute("select summary, detail_json from event_log where event_id = ?", (event.event_id,)).fetchone()
+    combined = "\n".join([prompt_text, ack_text, event.summary, json.dumps(event.detail), row["summary"], row["detail_json"], caplog.text])
+    for sentinel in [
+        "summary-token",
+        "summary-key",
+        "summary-cookie",
+        "subject-key",
+        "basic-token",
+        "0123456789abcdef",
+        "agent:main:discord:channel:c:t",
+        "nested-token",
+        "event_token",
+        "tailsecret",
+    ]:
+        assert sentinel not in combined
+    assert event.event_id.startswith("redacted:")
+    assert "tailsecret" not in ack_text
+    assert "repo" in prompt_text
+    assert "ok" in prompt_text
+    assert "relay.session.pr_opened" in ack_text
 
 
 @pytest.mark.asyncio

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import re
 import shlex
 from typing import Any
 
 from .adapter import registry_from_config, registry_path_from_config
+from .privacy import redact_metadata_text, redact_secret_text, safe_event_id
 from .registry import safe_session_key_hash
 
 
@@ -206,9 +206,11 @@ def _format_event_row(event: Any) -> str:
     summary_text = f" — {summary}" if summary else ""
     detail = _format_event_detail(getattr(event, "detail", {}) or {})
     detail_text = f" [{detail}]" if detail else ""
+    producer = _clip(redact_metadata_text(getattr(event, "producer_id", "")), 80)
+    event_type = _clip(redact_metadata_text(getattr(event, "event_type", "")), 80)
     return (
         f"- {event.created_at} `{event.thread_key or '-'}` "
-        f"{event.producer_id}/{event.event_type} "
+        f"{producer}/{event_type} "
         f"id={_short_event_id(event.event_id)} outcome=`{_display_outcome(event.outcome)}`{summary_text}{detail_text}"
     )
 
@@ -245,7 +247,7 @@ def _format_event_detail(detail: dict[str, Any]) -> str:
     parts: list[str] = []
     for key in keys:
         if key in detail:
-            value = _clip(str(detail[key]), 48)
+            value = _clip(redact_secret_text(str(detail[key]), max_input_chars=1000, max_output_chars=1000), 48)
             parts.append(f"{key}={value}")
     return ", ".join(parts)
 
@@ -266,34 +268,14 @@ def _diagnostic_summary(event: Any) -> str:
 
 
 def _redact_diagnostic_text(value: str) -> str:
-    text = str(value or "")[:1000]
-    text = re.sub(
-        r"(?i)\b(session[-_]?key|sessionKey)\b\s*[:= ]\s*[^,;\r\n]+",
-        lambda match: f"{match.group(1)}=<redacted>",
-        text,
-    )
-    text = re.sub(
-        r"\bagent:[A-Za-z0-9._:-]+",
-        "agent:<redacted>",
-        text,
-    )
-    text = re.sub(
-        r"(?i)\b(authorization|cookie|signature)\b\s*[:= ]\s*[^,;\r\n]+",
-        lambda match: f"{match.group(1)}=<redacted>",
-        text,
-    )
-    text = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+", "Bearer <redacted>", text)
-    text = re.sub(
-        r"(?i)\b(x[-_]?api[-_]?key|api[-_]?key|secret|token|password|credential)\b\s*[:=]\s*\S+",
-        lambda match: f"{match.group(1)}=<redacted>",
-        text,
-    )
-    return text
+    return redact_secret_text(value, max_input_chars=1000, max_output_chars=1000)
 
 
 def _short_event_id(event_id: str) -> str:
-    text = str(event_id or "")
-    return f"…{text[-8:]}" if len(text) > 8 else (text or "-")
+    text = safe_event_id(event_id)
+    if not text:
+        return "-"
+    return f"…{text[-8:]}" if len(text) > 8 else text
 
 
 def _cmd_list(registry: Any, *, owner_user_id: str) -> str:
