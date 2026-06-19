@@ -66,6 +66,15 @@ The registry schema stores optional `event_log.detail_json` for structured diagn
 
 Dispatch diagnostics currently include only privacy-safe operator metadata: target platform, gateway-runner/target-adapter presence, policy, whether a session key was present, a short hash of the resolved session key, active-session/queue state, whether `handle_message` was called/returned, direct-send success, and sanitized exception class/message. These fields say what the plugin knows about initial dispatch; they do not prove final user-visible delivery.
 
+Current operator-facing outcomes:
+
+- `agent_started`: idle `agent_queue` handed an internal event to the target platform adapter; this is not final visible delivery.
+- `queued_active_session`: `agent_queue` event merged into the target adapter pending-message queue because the session was already active.
+- `direct_delivered`: `direct` policy send returned success from the target platform adapter.
+- `dispatch_failed`, `duplicate`, and `rejected_*`: failure/de-dupe/auth scope states.
+
+For producer compatibility, HTTP response bodies still use the older initial status strings for the three successful handoff states: `accepted`, `queued`, and `delivered`.
+
 ## Event shape
 
 ```json

@@ -178,6 +178,7 @@ def test_status_events_and_inspect_show_owner_scoped_diagnostics(tmp_path):
     events = _run_command("events --limit 5", event=event, gateway=gateway)
     assert mine.thread_key in events
     assert "…23456789" in events
+    assert "outcome=`agent_started (legacy accepted)`" in events
     assert "token=<redacted>" in events
     assert "Bearer <redacted>" in events
     assert "target_platform=discord" in events
