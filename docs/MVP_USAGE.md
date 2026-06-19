@@ -97,9 +97,53 @@ For producer compatibility, HTTP response bodies still use the older initial sta
   "asyncThread": {"threadKey": "ath_..."},
   "summary": "Relay session opened a PR and is ready for review.",
   "subject": {"repo": "donovan-yohan/relay-ide", "pr": 123},
+  "tailMode": "compact",
   "payload": {"safe": "untrusted data only"}
 }
 ```
+
+### Long-running lane event shape
+
+For profile/background-agent producers, prefer compact state-transition payloads instead of raw command tails:
+
+```json
+{
+  "version": "async-thread-event/v1",
+  "eventId": "lane-issue17-finished-001",
+  "eventType": "relay.lane.finished",
+  "producer": {"id": "relay-ath-dev"},
+  "occurredAt": "2026-06-18T12:34:56Z",
+  "asyncThread": {"threadKey": "ath_..."},
+  "summary": "issue #17 implementation finished and is ready for review",
+  "tailMode": "compact",
+  "subject": {"repo": "donovan-yohan/hermes-plugin-async-threads", "issue": 17},
+  "payload": {
+    "profile": "ebi",
+    "lane": "issue17-compact-events",
+    "verdict": "passed",
+    "head_sha": "13df23b",
+    "pr_url": "https://github.com/donovan-yohan/hermes-plugin-async-threads/pull/20",
+    "changed_files": ["async_threads/rendering.py", "tests/test_adapter.py"],
+    "verification": "39 passed",
+    "log_path": "/path/to/lane.log"
+  }
+}
+```
+
+Recommended phase payloads:
+
+- `relay.lane.started`: `profile`, `lane`, `issue`/`pr`, optional `pid` or `delegation_id`, and `log_path`.
+- `relay.lane.progress`: one meaningful milestone; avoid heartbeat spam. Producers should cap this to 1–2 routine progress events per lane before a terminal state.
+- `relay.lane.finished`: `verdict`, exact `head_sha` when relevant, PR/comment URLs, `changed_files`, `verification`, and `log_path`.
+- `relay.lane.failed`: failure class, sanitized error summary, `log_path`, and retryability hint.
+
+`tailMode` controls raw tail handling for payload keys such as `tail`, `stdout`, `stderr`, `output`, and `transcript`:
+
+- `compact` (default): omit raw tails and replace them with char/line counts plus a log-path hint.
+- `none`: omit raw tails entirely.
+- `debug`: include a redacted tail capped to a hard debug limit; use only for explicit debugging.
+
+Large transcripts and oversized payload strings should be saved to logs and referenced by `log_path`, not injected into the conversation. In compact/none modes, oversized string fields are summarized with counts; `debug` includes only capped redacted text.
 
 Sign the exact request body:
 
