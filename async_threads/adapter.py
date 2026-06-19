@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import asyncio
+import hashlib
 from pathlib import Path
 from typing import Any, Mapping
 
 from .privacy import redact_metadata_text, safe_event_id
 from .registry import AsyncThreadHandle, AsyncThreadRegistry, safe_session_key_hash
-from .rendering import render_event_message
+from .rendering import render_event_message, tail_mode_from_event
 from .security import (
     DEFAULT_REPLAY_WINDOW_SECONDS,
     EventValidationError,
@@ -103,6 +105,32 @@ def _short_ack_id(event_id: str) -> str:
     return f"…{text[-8:]}" if len(text) > 8 else text
 
 
+def _compact_event_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        return {}
+    keys = [
+        "profile",
+        "lane",
+        "issue",
+        "pr",
+        "status",
+        "state",
+        "verdict",
+        "head_sha",
+        "pr_url",
+        "comment_url",
+        "verification",
+        "log_path",
+        "pid",
+        "delegation_id",
+    ]
+    compact: dict[str, Any] = {}
+    for key in keys:
+        if key in payload:
+            compact[key] = payload[key]
+    return compact
+
+
 class AsyncThreadsAdapter:  # subclassed dynamically to keep imports test-friendly
     pass
 
@@ -127,6 +155,8 @@ def _build_adapter_base():
             self._replay_window_seconds = int(
                 (config.extra or {}).get("replay_window_seconds", DEFAULT_REPLAY_WINDOW_SECONDS)
             )
+            self._coalesced_events: dict[str, list[dict[str, Any]]] = {}
+            self._coalesce_tasks: dict[str, asyncio.Task] = {}
 
         async def connect(self) -> bool:
             from aiohttp import web
@@ -150,6 +180,16 @@ def _build_adapter_base():
             if self._runner is not None:
                 await self._runner.cleanup()
                 self._runner = None
+            for task in list(self._coalesce_tasks.values()):
+                task.cancel()
+            for pending in list(self._coalesced_events.values()):
+                for item in pending:
+                    self._registry.forget_seen(
+                        producer_id=item["fields"]["producer_id"],
+                        event_id=item["fields"]["event_id"],
+                    )
+            self._coalesce_tasks.clear()
+            self._coalesced_events.clear()
 
         async def send(self, chat_id: str, content: str, reply_to=None, metadata=None):
             return SendResult(success=False, error="async_threads is an ingress-only platform")
@@ -233,6 +273,21 @@ def _build_adapter_base():
                         detail={"policy": handle.policy, "target_platform": handle.platform},
                     )
                     return web.json_response({"status": "duplicate", "threadKey": handle.thread_key})
+
+                if self._has_pending_coalesced(handle) and self._is_priority_event(data, fields):
+                    await self._flush_coalesced(handle.thread_key, reason="priority_flush")
+                elif self._should_coalesce(handle, data, fields):
+                    detail = self._queue_coalesced_event(handle, data, fields)
+                    self._registry.log_event(
+                        producer_id=fields["producer_id"],
+                        event_id=fields["event_id"],
+                        thread_key=fields["thread_key"],
+                        event_type=fields["event_type"],
+                        outcome="coalesced_pending",
+                        summary=fields["summary"],
+                        detail=detail,
+                    )
+                    return web.json_response({"status": "queued", "threadKey": handle.thread_key}, status=202)
 
                 try:
                     outcome, detail = await self.dispatch_event(handle, data, fields)
@@ -374,6 +429,165 @@ def _build_adapter_base():
                 raise DispatchEventError(str(exc), detail=detail) from exc
             detail["handle_message_returned"] = True
             return "agent_started", detail
+
+        def _should_coalesce(
+            self,
+            handle: AsyncThreadHandle,
+            data: Mapping[str, Any],
+            fields: Mapping[str, str],
+        ) -> bool:
+            return (
+                handle.policy == "agent_queue"
+                and handle.debounce_seconds > 0
+                and self._is_routine_event(fields)
+                and not self._is_priority_event(data, fields)
+            )
+
+        def _has_pending_coalesced(self, handle: AsyncThreadHandle) -> bool:
+            return bool(self._coalesced_events.get(handle.thread_key))
+
+        def _queue_coalesced_event(
+            self,
+            handle: AsyncThreadHandle,
+            data: Mapping[str, Any],
+            fields: Mapping[str, str],
+        ) -> dict[str, Any]:
+            bucket = self._coalesced_events.setdefault(handle.thread_key, [])
+            bucket.append({"handle": handle, "data": dict(data), "fields": dict(fields)})
+            if handle.thread_key not in self._coalesce_tasks:
+                self._coalesce_tasks[handle.thread_key] = asyncio.create_task(
+                    self._flush_coalesced_after(handle.thread_key, handle.debounce_seconds)
+                )
+            return {
+                "coalesced_count": len(bucket),
+                "coalesced_reason": "debounce_window",
+                "debounce_seconds": handle.debounce_seconds,
+            }
+
+        async def _flush_coalesced_after(self, thread_key: str, delay_seconds: int) -> None:
+            try:
+                await asyncio.sleep(max(0, delay_seconds))
+                await self._flush_coalesced(thread_key, reason="debounce_elapsed")
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:  # noqa: BLE001
+                logger.error("async-thread coalesced flush failed: %s", type(exc).__name__)
+
+        async def _flush_coalesced(self, thread_key: str, *, reason: str) -> None:
+            pending = self._pop_coalesced(thread_key)
+            if not pending:
+                return
+            handle = pending[-1]["handle"]
+            data, fields = self._coalesced_digest(pending, reason=reason)
+            try:
+                outcome, detail = await self.dispatch_event(handle, data, fields)
+            except Exception as exc:  # noqa: BLE001
+                detail = dict(getattr(exc, "detail", {}) or {})
+                detail.update(
+                    {
+                        "coalesced_count": len(pending),
+                        "coalesced_reason": reason,
+                        "exception_class": type(exc).__name__,
+                        "exception_message": str(exc),
+                    }
+                )
+                self._registry.log_event(
+                    producer_id=fields["producer_id"],
+                    event_id=fields["event_id"],
+                    thread_key=fields["thread_key"],
+                    event_type=fields["event_type"],
+                    outcome="dispatch_failed",
+                    summary=fields["summary"],
+                    detail=detail,
+                )
+                if self._requeue_failed_coalesced(thread_key, pending, handle):
+                    return
+                for item in pending:
+                    self._registry.forget_seen(
+                        producer_id=item["fields"]["producer_id"],
+                        event_id=item["fields"]["event_id"],
+                    )
+                return
+            detail.update({"coalesced_count": len(pending), "coalesced_reason": reason})
+            self._registry.log_event(
+                producer_id=fields["producer_id"],
+                event_id=fields["event_id"],
+                thread_key=fields["thread_key"],
+                event_type=fields["event_type"],
+                outcome=outcome,
+                summary=fields["summary"],
+                detail=detail,
+            )
+
+        def _pop_coalesced(self, thread_key: str) -> list[dict[str, Any]]:
+            task = self._coalesce_tasks.pop(thread_key, None)
+            current = asyncio.current_task()
+            if task is not None and task is not current:
+                task.cancel()
+            return self._coalesced_events.pop(thread_key, [])
+
+        def _requeue_failed_coalesced(self, thread_key: str, pending: list[dict[str, Any]], handle: AsyncThreadHandle) -> bool:
+            attempts = max(int(item.get("attempts", 0)) for item in pending) + 1
+            if attempts > 3 or not self._running:
+                return False
+            for item in pending:
+                item["attempts"] = attempts
+            self._coalesced_events[thread_key] = pending
+            delay = max(1, min(handle.debounce_seconds or 1, 30))
+            self._coalesce_tasks[thread_key] = asyncio.create_task(self._flush_coalesced_after(thread_key, delay))
+            return True
+
+        def _coalesced_digest(self, pending: list[dict[str, Any]], *, reason: str) -> tuple[dict[str, Any], dict[str, str]]:
+            last_fields = pending[-1]["fields"]
+            digest_id = hashlib.sha256(
+                "|".join(item["fields"]["event_id"] for item in pending).encode("utf-8")
+            ).hexdigest()[:16]
+            events = []
+            for item in pending:
+                fields = item["fields"]
+                payload = item["data"].get("payload", {}) if isinstance(item["data"], Mapping) else {}
+                events.append(
+                    {
+                        "event_id": safe_event_id(fields["event_id"]),
+                        "event_type": redact_metadata_text(fields["event_type"]),
+                        "summary": fields.get("summary", ""),
+                        "payload": _compact_event_payload(payload),
+                    }
+                )
+            data = {
+                "tailMode": "compact",
+                "subject": {"thread_key": last_fields["thread_key"], "coalesced_count": len(pending)},
+                "payload": {"reason": reason, "events": events},
+            }
+            fields = {
+                "event_id": f"coalesced_{digest_id}",
+                "event_type": "async_threads.coalesced",
+                "producer_id": last_fields["producer_id"],
+                "thread_key": last_fields["thread_key"],
+                "summary": f"{len(pending)} async-thread routine events coalesced",
+            }
+            return data, fields
+
+        def _is_routine_event(self, fields: Mapping[str, str]) -> bool:
+            event_type = str(fields.get("event_type", "")).lower()
+            return any(marker in event_type for marker in ("started", "progress"))
+
+        def _is_priority_event(self, data: Mapping[str, Any], fields: Mapping[str, str]) -> bool:
+            event_type = str(fields.get("event_type", "")).lower().replace("-", "_")
+            if any(
+                marker in event_type
+                for marker in ("finished", "completed", "succeeded", "done", "failed", "failure", "error", "blocked", "needs_attention")
+            ):
+                return True
+            if tail_mode_from_event(data) == "debug":
+                return True
+            payload = data.get("payload", {}) if isinstance(data, Mapping) else {}
+            if isinstance(payload, Mapping):
+                for key in ("state", "status", "verdict"):
+                    value = str(payload.get(key, "")).lower().replace("-", "_")
+                    if value in {"finished", "completed", "succeeded", "done", "failed", "failure", "errored", "error", "blocked", "needs_attention"}:
+                        return True
+            return False
 
         async def _send_ack_notice(
             self,

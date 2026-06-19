@@ -31,6 +31,10 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(r"(?i)\b(x[-_]?api[-_]?key|api[-_]?key|secret|token|password|credential)\b\s*[:=]\s*\S+"),
         r"\1=<redacted>",
     ),
+    (
+        re.compile(r"(?i)\b(access[-_]?token|refresh[-_]?token|id[-_]?token)\b\s*[:=]\s*[^&\s,;\r\n]+"),
+        r"\1=<redacted>",
+    ),
     (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer <redacted>"),
     (re.compile(r"(?i)\bbasic\s+[A-Za-z0-9._~+/=-]+"), "Basic <redacted>"),
     (re.compile(r"\bsha256=[A-Fa-f0-9]{8,}\b"), "sha256=<redacted>"),

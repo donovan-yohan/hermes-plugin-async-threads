@@ -48,9 +48,12 @@ Acknowledgements are opt-in for `agent_queue` listeners:
 /ath listen relay --events relay.session.pr_opened --ack none   # default, silent
 /ath listen relay --events relay.session.pr_opened --ack brief  # one compact visible notice
 /ath listen relay --events relay.session.pr_opened --ack debug  # safe diagnostic notice
+/ath listen relay --events relay.lane.started,relay.lane.progress --debounce 45  # coalesce routine lane noise
 ```
 
 `--ack` is ignored for `--policy direct`; direct delivery is already visible when it succeeds.
+
+`--debounce` is optional and only applies to `agent_queue` listeners. Routine `started`/`progress` events for the same thread are held for the debounce window and delivered as one compact digest. Terminal/priority events bypass the window and flush any pending digest immediately: `finished`/completed/succeeded states, failures/errors, `blocked`, `needs_attention`, payload states/verdicts with those values, or events that explicitly request `tailMode: debug`.
 
 The command replies with:
 
@@ -82,6 +85,7 @@ Current operator-facing outcomes:
 - `queued_active_session`: `agent_queue` event merged into the target adapter pending-message queue because the session was already active.
 - `direct_delivered`: `direct` policy send returned success from the target platform adapter.
 - `dispatch_failed`, `duplicate`, and `rejected_*`: failure/de-dupe/auth scope states.
+- `coalesced_pending`: a routine event was accepted and is waiting in a debounce window before a compact digest wake.
 
 For producer compatibility, HTTP response bodies still use the older initial status strings for the three successful handoff states: `accepted`, `queued`, and `delivered`.
 
@@ -136,6 +140,8 @@ Recommended phase payloads:
 - `relay.lane.progress`: one meaningful milestone; avoid heartbeat spam. Producers should cap this to 1–2 routine progress events per lane before a terminal state.
 - `relay.lane.finished`: `verdict`, exact `head_sha` when relevant, PR/comment URLs, `changed_files`, `verification`, and `log_path`.
 - `relay.lane.failed`: failure class, sanitized error summary, `log_path`, and retryability hint.
+
+For listeners with `--debounce`, multiple same-thread `started`/routine `progress` events become one `async_threads.coalesced` digest payload. Terminal/high-priority events (`finished`, `failed`, `blocked`, `needs_attention`, explicit `tailMode: debug`) bypass debounce and flush any pending routine events immediately so failures and completion states are not hidden behind the timer.
 
 `tailMode` controls raw tail handling for payload keys such as `tail`, `stdout`, `stderr`, `output`, and `transcript`:
 
