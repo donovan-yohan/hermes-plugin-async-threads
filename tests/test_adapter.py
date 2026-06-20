@@ -385,6 +385,53 @@ async def test_direct_policy_sends_without_agent(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_direct_policy_without_thread_sends_no_metadata(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", policy="direct")
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+
+    outcome, detail = await adapter.dispatch_event(handle, {"payload": {}}, _fields(handle))
+
+    assert outcome == "direct_delivered"
+    assert detail["direct_send_success"] is True
+    assert target.sent[0][2] is None
+
+
+@pytest.mark.asyncio
+async def test_direct_policy_telegram_dm_topic_uses_platform_aware_metadata(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="12345",
+        chat_type="dm",
+        thread_id="42",
+        user_id="67890",
+        message_id="99",
+    )
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", policy="direct")
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.TELEGRAM: target})
+
+    outcome, detail = await adapter.dispatch_event(handle, {"payload": {}}, _fields(handle))
+
+    assert outcome == "direct_delivered"
+    assert detail["target_platform"] == "telegram"
+    assert target.sent[0][0] == "12345"
+    assert target.sent[0][2] == {
+        "thread_id": "42",
+        "telegram_dm_topic_reply_fallback": True,
+        "direct_messages_topic_id": "42",
+        "telegram_reply_to_message_id": "99",
+    }
+
+
+@pytest.mark.asyncio
 async def test_agent_queue_brief_ack_sends_visible_notice_before_handoff(tmp_path):
     config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
     adapter = AsyncThreadsAdapter(config)

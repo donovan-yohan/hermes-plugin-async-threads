@@ -8,6 +8,7 @@ from typing import Any
 from .adapter import registry_from_config, registry_path_from_config
 from .privacy import redact_metadata_text, redact_secret_text, safe_event_id
 from .registry import safe_session_key_hash
+from .routing import send_metadata_for_source
 from .workflows import WorkflowPolicy
 
 
@@ -465,7 +466,7 @@ async def _send_notice(gateway: Any, event: Any, content: str) -> None:
     adapter = gateway.adapters.get(source.platform)
     if adapter is None:
         return
-    metadata = {"thread_id": source.thread_id} if getattr(source, "thread_id", None) else None
+    metadata = send_metadata_for_source(source)
     await adapter.send(source.chat_id, content, metadata=metadata)
 
 
