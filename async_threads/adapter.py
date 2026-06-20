@@ -482,7 +482,8 @@ def _build_adapter_base():
         ) -> dict[str, Any]:
             bucket = self._coalesced_events.setdefault(handle.thread_key, [])
             bucket.append({"handle": handle, "data": dict(data), "fields": dict(fields)})
-            if handle.thread_key not in self._coalesce_tasks:
+            task = self._coalesce_tasks.get(handle.thread_key)
+            if task is None or task.done():
                 self._coalesce_tasks[handle.thread_key] = asyncio.create_task(
                     self._flush_coalesced_after(handle.thread_key, handle.debounce_seconds)
                 )
@@ -504,6 +505,9 @@ def _build_adapter_base():
                 logger.error("async-thread coalesced flush failed: %s", type(exc).__name__)
 
         async def _flush_coalesced(self, thread_key: str, *, reason: str) -> None:
+            if thread_key in self._coalesced_inflight:
+                self._reschedule_coalesced_if_needed(thread_key)
+                return
             pending = self._pop_coalesced(thread_key)
             if not pending:
                 return
@@ -532,7 +536,7 @@ def _build_adapter_base():
                         summary=fields["summary"],
                         detail=detail,
                     )
-                    if self._requeue_failed_coalesced(thread_key, pending, handle):
+                    if self._requeue_failed_coalesced(thread_key, pending):
                         return
                     for item in pending:
                         self._registry.forget_seen(
@@ -560,7 +564,7 @@ def _build_adapter_base():
                 task.cancel()
             return self._coalesced_events.pop(thread_key, [])
 
-        def _requeue_failed_coalesced(self, thread_key: str, pending: list[dict[str, Any]], handle: AsyncThreadHandle) -> bool:
+        def _requeue_failed_coalesced(self, thread_key: str, pending: list[dict[str, Any]]) -> bool:
             attempts = max(int(item.get("attempts", 0)) for item in pending) + 1
             if attempts > 3 or not self._running:
                 return False
@@ -568,11 +572,22 @@ def _build_adapter_base():
                 item["attempts"] = attempts
             queued_during_flush = self._coalesced_events.pop(thread_key, [])
             self._coalesced_events[thread_key] = pending + queued_during_flush
-            delay = max(1, min(handle.debounce_seconds or 1, 30))
-            task = self._coalesce_tasks.get(thread_key)
-            if task is None or task.done():
-                self._coalesce_tasks[thread_key] = asyncio.create_task(self._flush_coalesced_after(thread_key, delay))
+            self._reschedule_coalesced_if_needed(thread_key)
             return True
+
+        def _reschedule_coalesced_if_needed(self, thread_key: str) -> None:
+            pending = self._coalesced_events.get(thread_key)
+            current = asyncio.current_task()
+            task = self._coalesce_tasks.get(thread_key)
+            if not pending:
+                if task is current:
+                    self._coalesce_tasks.pop(thread_key, None)
+                return
+            if task is not None and task is not current and not task.done():
+                return
+            handle = pending[-1]["handle"]
+            delay = max(1, min(handle.debounce_seconds or 1, 30))
+            self._coalesce_tasks[thread_key] = asyncio.create_task(self._flush_coalesced_after(thread_key, delay))
 
         def _coalesced_digest(self, pending: list[dict[str, Any]], *, reason: str) -> tuple[dict[str, Any], dict[str, str]]:
             last_fields = pending[-1]["fields"]
