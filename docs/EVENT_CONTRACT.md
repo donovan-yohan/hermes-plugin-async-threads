@@ -99,10 +99,12 @@ Behavior:
 For normal bridges, prefer:
 
 ```json
-"payload": {
-  "status": "failed",
-  "log_path": "/var/log/jobs/build-123.log",
-  "tail": "...large output omitted by compact mode..."
+{
+  "payload": {
+    "status": "failed",
+    "log_path": "/var/log/jobs/build-123.log",
+    "tail": "...large output omitted by compact mode..."
+  }
 }
 ```
 
@@ -127,8 +129,9 @@ Idempotency means the producer can retry safely without creating duplicate visib
 | `202` | `{ "status": "accepted", "threadKey": "ath_..." }` | Agent continuation started or was accepted. |
 | `202` | `{ "status": "queued", "threadKey": "ath_..." }` | Event was queued behind an active session or debounce/coalescing window. |
 | `200` | `{ "status": "duplicate", "threadKey": "ath_..." }` | The producer/event id was already accepted after final handling. |
-| `400` | `{ "error": "..." }` | Invalid JSON, unsupported version, missing fields, bad timestamp, or body too large. |
+| `400` | `{ "error": "..." }` | Invalid JSON, unsupported version, missing fields, or bad timestamp. |
 | `401` | `{ "error": "invalid signature" }` | Missing handle, disabled handle, invalid HMAC, wrong producer, or disallowed event type. Auth/scope errors intentionally use the same public error. |
+| `413` | server-generated body-too-large response | The request exceeded the configured receiver body limit before event parsing. |
 | `502` | `{ "error": "event dispatch failed" }` | Auth passed, but delivery/queueing failed. Retry with the same `eventId` unless your bridge has stronger recovery logic. |
 
 ## Bridge/generator checklist

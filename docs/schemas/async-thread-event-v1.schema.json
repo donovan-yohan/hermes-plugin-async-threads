@@ -105,7 +105,10 @@
       "additionalProperties": true,
       "properties": {
         "kind": {"type": "string"},
-        "status": {"type": "string", "enum": ["passed", "failed", "stale", "unknown"]}
+        "status": {
+          "type": "string",
+          "description": "Producer evidence status. The receiver normalizes unknown values to unknown."
+        }
       }
     }
   }
