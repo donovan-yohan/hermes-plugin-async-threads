@@ -50,7 +50,6 @@ Authenticated accepted events, duplicates, dispatch failures, and authenticated 
 
 The public-release readiness epic tracks remaining hardening before broad shareout:
 
-- make coalesced event retry/de-dupe semantics final-delivery-safe;
 - add more compatibility evidence before claiming non-Discord gateway support.
 
 See https://github.com/donovan-yohan/hermes-plugin-async-threads/issues/33

@@ -54,6 +54,34 @@ class FakeTargetAdapter:
         return SimpleNamespace(success=True)
 
 
+class SlowFailTargetAdapter(FakeTargetAdapter):
+    def __init__(self):
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def handle_message(self, event):
+        self.entered.set()
+        await self.release.wait()
+        raise RuntimeError("slow digest failure")
+
+
+class HoldFirstDigestTargetAdapter(FakeTargetAdapter):
+    def __init__(self):
+        super().__init__()
+        self.first_entered = asyncio.Event()
+        self.second_entered = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def handle_message(self, event):
+        self.handled.append(event)
+        if len(self.handled) == 1:
+            self.first_entered.set()
+            await self.release_first.wait()
+        else:
+            self.second_entered.set()
+
+
 class FakeRequest:
     def __init__(self, body: bytes, secret: str):
         digest = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
@@ -556,6 +584,160 @@ async def test_coalesces_routine_started_progress_events_into_one_digest(tmp_pat
     )
     assert json.loads(duplicate.text)["status"] == "duplicate"
     assert len(target.handled) == 1
+
+
+@pytest.mark.asyncio
+async def test_coalesced_retry_during_failed_flush_is_not_final_duplicate(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    adapter._running = True
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", debounce_seconds=30)
+    body = _event_body(handle, "evt_progress_retrying", "relay.lane.progress", "lane retrying", {"lane": "lane-a"})
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: FakeTargetAdapter(fail_handle=True)})
+
+    first = await adapter._handle_event(FakeRequest(body, handle.secret))
+    await adapter._flush_coalesced(handle.thread_key, reason="test_failure")
+    retry_while_requeued = await adapter._handle_event(FakeRequest(body, handle.secret))
+
+    assert first.status == 202
+    assert retry_while_requeued.status == 202
+    assert json.loads(retry_while_requeued.text)["status"] == "queued"
+    events = registry.list_recent_events(thread_key=handle.thread_key, limit=10)
+    assert events[0].outcome == "dispatch_failed"
+    assert not any(event.outcome == "duplicate" for event in events)
+
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+    await adapter._flush_coalesced(handle.thread_key, reason="retry_success")
+    duplicate_after_delivery = await adapter._handle_event(FakeRequest(body, handle.secret))
+
+    assert len(target.handled) == 1
+    assert json.loads(duplicate_after_delivery.text)["status"] == "duplicate"
+
+
+@pytest.mark.asyncio
+async def test_coalesced_retry_during_inflight_failed_flush_is_not_final_duplicate(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    adapter._running = True
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", debounce_seconds=30)
+    body = _event_body(handle, "evt_progress_inflight", "relay.lane.progress", "lane inflight", {"lane": "lane-a"})
+    slow_target = SlowFailTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: slow_target})
+
+    first = await adapter._handle_event(FakeRequest(body, handle.secret))
+    flush_task = asyncio.create_task(adapter._flush_coalesced(handle.thread_key, reason="inflight_failure"))
+    await slow_target.entered.wait()
+    retry_during_inflight = await adapter._handle_event(FakeRequest(body, handle.secret))
+
+    assert first.status == 202
+    assert retry_during_inflight.status == 202
+    assert json.loads(retry_during_inflight.text)["status"] == "queued"
+    assert not any(event.outcome == "duplicate" for event in registry.list_recent_events(thread_key=handle.thread_key, limit=10))
+
+    slow_target.release.set()
+    await flush_task
+    events = registry.list_recent_events(thread_key=handle.thread_key, limit=10)
+    assert events[0].outcome == "dispatch_failed"
+    assert not any(event.outcome == "duplicate" for event in events)
+
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+    await adapter._flush_coalesced(handle.thread_key, reason="retry_success")
+    duplicate_after_delivery = await adapter._handle_event(FakeRequest(body, handle.secret))
+
+    assert len(target.handled) == 1
+    assert json.loads(duplicate_after_delivery.text)["status"] == "duplicate"
+
+
+@pytest.mark.asyncio
+async def test_coalesced_event_queued_during_inflight_failed_flush_is_preserved(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    adapter._running = True
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", debounce_seconds=30)
+    body_a = _event_body(handle, "evt_progress_inflight_a", "relay.lane.progress", "lane a inflight", {"lane": "lane-a"})
+    body_b = _event_body(handle, "evt_progress_inflight_b", "relay.lane.progress", "lane b inflight", {"lane": "lane-b"})
+    slow_target = SlowFailTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: slow_target})
+
+    first = await adapter._handle_event(FakeRequest(body_a, handle.secret))
+    flush_task = asyncio.create_task(adapter._flush_coalesced(handle.thread_key, reason="inflight_failure"))
+    await slow_target.entered.wait()
+    queued_during_inflight = await adapter._handle_event(FakeRequest(body_b, handle.secret))
+
+    assert first.status == 202
+    assert queued_during_inflight.status == 202
+    assert json.loads(queued_during_inflight.text)["status"] == "queued"
+
+    slow_target.release.set()
+    await flush_task
+    retry_while_requeued = await adapter._handle_event(FakeRequest(body_b, handle.secret))
+
+    assert json.loads(retry_while_requeued.text)["status"] == "queued"
+    assert not any(event.outcome == "duplicate" for event in registry.list_recent_events(thread_key=handle.thread_key, limit=10))
+
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+    await adapter._flush_coalesced(handle.thread_key, reason="retry_success")
+    duplicate_after_delivery = await adapter._handle_event(FakeRequest(body_b, handle.secret))
+
+    assert len(target.handled) == 1
+    digest_text = target.handled[0].text
+    assert "evt_progress_inflight_a" in digest_text
+    assert "evt_progress_inflight_b" in digest_text
+    assert json.loads(duplicate_after_delivery.text)["status"] == "duplicate"
+
+
+@pytest.mark.asyncio
+async def test_overlapping_coalesced_flush_does_not_make_inflight_event_final_duplicate(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    adapter._running = True
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", debounce_seconds=30)
+    body_a = _event_body(handle, "evt_progress_overlap_a", "relay.lane.progress", "lane a overlap", {"lane": "lane-a"})
+    body_b = _event_body(handle, "evt_progress_overlap_b", "relay.lane.progress", "lane b overlap", {"lane": "lane-b"})
+    target = HoldFirstDigestTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+
+    first = await adapter._handle_event(FakeRequest(body_a, handle.secret))
+    first_flush = asyncio.create_task(adapter._flush_coalesced(handle.thread_key, reason="first_flush"))
+    await target.first_entered.wait()
+    queued_during_inflight = await adapter._handle_event(FakeRequest(body_b, handle.secret))
+    scheduled_task = adapter._coalesce_tasks.pop(handle.thread_key)
+    scheduled_task.cancel()
+    overlapping_flush = asyncio.create_task(adapter._flush_coalesced(handle.thread_key, reason="overlap_flush"))
+    adapter._coalesce_tasks[handle.thread_key] = overlapping_flush
+    await overlapping_flush
+    retry_a_before_delivery = await adapter._handle_event(FakeRequest(body_a, handle.secret))
+    retry_b_before_delivery = await adapter._handle_event(FakeRequest(body_b, handle.secret))
+
+    assert first.status == 202
+    assert queued_during_inflight.status == 202
+    assert json.loads(retry_a_before_delivery.text)["status"] == "queued"
+    assert json.loads(retry_b_before_delivery.text)["status"] == "queued"
+    assert not target.second_entered.is_set()
+    assert len(target.handled) == 1
+    assert not any(event.outcome == "duplicate" for event in registry.list_recent_events(thread_key=handle.thread_key, limit=20))
+
+    target.release_first.set()
+    await first_flush
+    await adapter._flush_coalesced(handle.thread_key, reason="queued_after_overlap")
+    duplicate_a_after_delivery = await adapter._handle_event(FakeRequest(body_a, handle.secret))
+    duplicate_b_after_delivery = await adapter._handle_event(FakeRequest(body_b, handle.secret))
+
+    assert len(target.handled) == 2
+    assert "evt_progress_overlap_b" in target.handled[1].text
+    assert json.loads(duplicate_a_after_delivery.text)["status"] == "duplicate"
+    assert json.loads(duplicate_b_after_delivery.text)["status"] == "duplicate"
 
 
 @pytest.mark.asyncio
