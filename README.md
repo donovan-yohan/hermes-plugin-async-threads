@@ -1,5 +1,7 @@
 # hermes-plugin-async-threads
 
+![Async Threads banner showing signed producer events waking one mapped Hermes conversation](docs/assets/async-threads-banner.png)
+
 > Event-driven wakeups for existing Hermes gateway conversations, without cron polling.
 
 `hermes-plugin-async-threads` lets an external producer send a signed event to Hermes and target an existing conversation handle. Hermes validates the event, de-dupes it, resolves the registered async-thread handle, and either posts a direct notification or queues a bounded continuation into the same gateway session.
@@ -34,6 +36,10 @@ Good fits:
 - workflow/control-plane systems that should notify or resume a Hermes conversation without learning chat-platform APIs.
 
 ## How it works
+
+![Baoyu infographic showing producer event validation, registry lookup, policy routing, and same gateway conversation delivery](docs/assets/baoyu-async-thread-flow.png)
+
+The diagram above is intentionally scoped to the current MVP: gateway-local dispatch, Discord-shaped path tested first, and producer payload boxed as untrusted data.
 
 1. A user creates a listener from an existing Hermes gateway conversation with `/ath listen`.
 2. The plugin stores a durable `threadKey`, the captured Hermes `SessionSource`, allowed producer/event scope, policy, and a per-handle HMAC secret.
