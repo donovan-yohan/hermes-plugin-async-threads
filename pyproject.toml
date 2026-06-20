@@ -1,0 +1,39 @@
+[project]
+name = "hermes-plugin-async-threads"
+version = "0.1.0"
+description = "Event-driven async thread continuation plugin for Hermes gateway sessions"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+  { name = "Donovan Yohan" }
+]
+dependencies = [
+  "aiohttp>=3.9",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "PyYAML>=6",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "PyYAML>=6",
+]
+
+[project.entry-points."hermes_agent.plugins"]
+async-threads = "hermes_plugin_async_threads"
+
+[tool.setuptools]
+packages = ["async_threads", "hermes_plugin_async_threads"]
+py-modules = []
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
