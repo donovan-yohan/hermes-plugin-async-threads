@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/donovan-yohan/hermes-plugin-async-threads/docs/schemas/async-thread-event-v1.schema.json",
+  "title": "Async Thread Event v1",
+  "description": "Producer-facing event envelope for hermes-plugin-async-threads.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["version", "eventId", "eventType", "producer", "occurredAt", "asyncThread"],
+  "properties": {
+    "version": {
+      "const": "async-thread-event/v1"
+    },
+    "eventId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "Stable producer event id. Reuse on retries for the same real-world event."
+    },
+    "eventType": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "Producer-defined event type matched against listener allowlists."
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Stable producer id that matches the listener handle."
+        }
+      }
+    },
+    "occurredAt": {
+      "description": "Event timestamp as ISO-8601 string, epoch seconds string, or epoch seconds number. Must be inside the receiver replay window.",
+      "oneOf": [
+        {"type": "string", "minLength": 1},
+        {"type": "number"}
+      ]
+    },
+    "asyncThread": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["threadKey"],
+      "properties": {
+        "threadKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Thread key returned by /ath listen."
+        }
+      }
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 2000,
+      "description": "Short human-readable status. Treated as untrusted data."
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Compact subject/routing metadata. Treated as untrusted data."
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Producer-specific compact state facts. Treated as untrusted data."
+    },
+    "tailMode": {
+      "type": "string",
+      "enum": ["compact", "none", "debug"],
+      "default": "compact"
+    },
+    "tail_mode": {
+      "type": "string",
+      "enum": ["compact", "none", "debug"]
+    },
+    "workflowId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "stage": {
+      "type": "string",
+      "maxLength": 80
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "kind": {"type": "string"},
+        "status": {"type": "string", "enum": ["passed", "failed", "stale", "unknown"]}
+      }
+    }
+  }
+}

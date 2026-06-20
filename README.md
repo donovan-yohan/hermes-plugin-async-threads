@@ -50,7 +50,7 @@ The diagram above is intentionally scoped to the current MVP: gateway-local disp
 
 ## Quickstart
 
-See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for install/config and a complete signed demo event.
+See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for install/config and a complete signed demo event. See [`docs/EVENT_CONTRACT.md`](docs/EVENT_CONTRACT.md) for the producer-facing event contract and JSON Schema.
 
 Minimal listener example from a supported Hermes gateway conversation:
 
@@ -58,7 +58,7 @@ Minimal listener example from a supported Hermes gateway conversation:
 /ath listen demo --events demo.job.finished --ack brief
 ```
 
-Minimal event envelope:
+Minimal event envelope, matching the [`async-thread-event/v1` contract](docs/EVENT_CONTRACT.md):
 
 ```json
 {
