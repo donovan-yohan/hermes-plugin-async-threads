@@ -6,6 +6,7 @@ import pytest
 
 from async_threads import registry as registry_module
 from async_threads.registry import AsyncThreadRegistry, SCHEMA_VERSION, sanitize_event_detail
+from async_threads.workflows import WorkflowPolicy, normalize_workflow_event
 
 
 def test_registry_creates_lists_revokes_and_dedupes(tmp_path: Path):
@@ -40,6 +41,7 @@ def test_registry_creates_lists_revokes_and_dedupes(tmp_path: Path):
     assert "idx_event_log_thread_key" in indexes
     assert "detail_json" in event_log_columns
     assert "ack_mode" in handle_columns
+    assert "workflow_policy_json" in handle_columns
     assert schema_version == str(SCHEMA_VERSION)
 
     listed = reg.list_handles(owner_user_id="u1")
@@ -103,6 +105,118 @@ def test_registry_creates_lists_revokes_and_dedupes(tmp_path: Path):
 
     assert reg.revoke(handle.thread_key) is True
     assert reg.get_handle(handle.thread_key).enabled is False
+
+
+def test_normalize_workflow_event_ignores_non_mapping_payloads():
+    assert normalize_workflow_event([], {"event_id": "evt", "event_type": "job.progress", "summary": "ignored"}) is None
+    assert normalize_workflow_event("not-json-object", {"event_id": "evt", "event_type": "job.progress"}) is None
+
+
+def test_workflow_state_tracks_candidate_gates_and_stale_evidence(tmp_path: Path):
+    reg = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    handle = reg.create_handle(
+        source={"platform": "discord", "chat_id": "c", "thread_id": "t", "chat_type": "channel"},
+        producer_id="relay",
+        owner_user_id="u1",
+        workflow_policy=WorkflowPolicy(
+            gate_order=("review", "qa"),
+            gate_mode="serial",
+            stale_on_artifact_change=("review", "qa"),
+            candidate_required=("qa",),
+        ),
+    )
+
+    state = reg.update_workflow_state_from_event(
+        handle=handle,
+        fields={
+            "event_id": "evt_review_passed",
+            "event_type": "job.review",
+            "producer_id": "relay",
+            "thread_key": handle.thread_key,
+            "summary": "review passed Bearer nope",
+        },
+        data={
+            "workflowId": "wf-feature-1",
+            "stage": "review_passed",
+            "artifact": {"kind": "git_commit", "id": "abc123"},
+            "candidate": {"id": "rc1", "kind": "feature", "readiness": "forming"},
+            "evidence": {"kind": "review", "status": "passed", "summary": "looks ok"},
+        },
+    )
+
+    assert state is not None
+    assert state.stage == "review_passed"
+    assert state.evidence["review"]["status"] == "passed"
+    assert state.gates["active"] == []
+    assert state.gates["deferred"] == ["qa"]
+    assert state.gates["states"]["qa"]["state"] == "deferred_candidate_not_ready"
+    assert "nope" not in state.last_summary
+
+    updated = reg.update_workflow_state_from_event(
+        handle=handle,
+        fields={
+            "event_id": "evt_candidate_ready",
+            "event_type": "job.candidate_ready",
+            "producer_id": "relay",
+            "thread_key": handle.thread_key,
+            "summary": "candidate ready",
+        },
+        data={
+            "workflowId": "wf-feature-1",
+            "stage": "candidate_ready",
+            "artifact": {"kind": "git_commit", "id": "def456"},
+            "candidate": {"id": "rc1", "kind": "feature", "readiness": "ready"},
+        },
+    )
+
+    assert updated is not None
+    assert updated.evidence["review"]["status"] == "stale"
+    assert updated.evidence["review"]["stale_reason"] == "artifact_changed"
+    assert updated.gates["active"] == ["review"]
+    assert updated.gates["states"]["qa"]["state"] == "deferred_serial_gate"
+    assert reg.count_workflow_states(owner_user_id="u1") == 1
+    [listed] = reg.list_workflow_states(owner_user_id="u1")
+    assert listed.workflow_id == "wf-feature-1"
+
+
+def test_serial_candidate_required_gate_blocks_later_gates_and_terminal_stage_persists(tmp_path: Path):
+    reg = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    handle = reg.create_handle(
+        source={"platform": "discord", "chat_id": "c", "thread_id": "t", "chat_type": "channel"},
+        producer_id="relay",
+        owner_user_id="u1",
+        workflow_policy=WorkflowPolicy(
+            gate_order=("qa", "release"),
+            gate_mode="serial",
+            candidate_required=("qa",),
+        ),
+    )
+
+    blocked = reg.update_workflow_state_from_event(
+        handle=handle,
+        fields={"event_id": "evt_forming", "event_type": "job.progress", "producer_id": "relay", "thread_key": handle.thread_key, "summary": "forming"},
+        data={"workflowId": "wf-terminal", "stage": "progress", "candidate": {"id": "rc1", "readiness": "forming"}},
+    )
+
+    assert blocked is not None
+    assert blocked.gates["active"] == []
+    assert blocked.gates["deferred"] == ["qa", "release"]
+    assert blocked.gates["states"]["qa"]["state"] == "deferred_candidate_not_ready"
+    assert blocked.gates["states"]["release"]["state"] == "deferred_serial_gate"
+
+    released = reg.update_workflow_state_from_event(
+        handle=handle,
+        fields={"event_id": "evt_released", "event_type": "job.released", "producer_id": "relay", "thread_key": handle.thread_key, "summary": "released"},
+        data={"workflowId": "wf-terminal", "stage": "released", "candidate": {"id": "rc1", "readiness": "released"}},
+    )
+    late_progress = reg.update_workflow_state_from_event(
+        handle=handle,
+        fields={"event_id": "evt_late_progress", "event_type": "job.progress", "producer_id": "relay", "thread_key": handle.thread_key, "summary": "late progress"},
+        data={"workflowId": "wf-terminal", "stage": "progress"},
+    )
+
+    assert released is not None and released.stage == "released"
+    assert late_progress is not None and late_progress.stage == "released"
 
 
 def test_registry_connect_closes_connections(tmp_path: Path, monkeypatch):
@@ -212,6 +326,7 @@ def test_v1_registry_migrates_detail_json_without_data_loss(tmp_path: Path):
         ack_mode = migrated.execute("select ack_mode from async_thread_handles where thread_key = 'ath_v1'").fetchone()[0]
     assert "detail_json" in columns
     assert "ack_mode" in handle_columns
+    assert "workflow_policy_json" in handle_columns
     assert schema_version == str(SCHEMA_VERSION)
     assert detail_json == "{}"
     assert ack_mode == "none"

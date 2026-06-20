@@ -30,17 +30,21 @@ _TAIL_KEYS = {
 _TAIL_MODE_KEYS = {"tailmode", "tail_mode"}
 
 
-def render_event_message(data: Mapping[str, Any], *, event_type: str, producer_id: str, summary: str) -> str:
+def render_event_message(data: Any, *, event_type: str, producer_id: str, summary: str) -> str:
     """Return the text injected into the existing Hermes session.
 
     The route/producer authentication is trusted enough to wake the session;
     payload text is still untrusted data and is framed that way for the agent.
     """
+    if not isinstance(data, Mapping):
+        data = {}
     payload = data.get("payload", {})
     subject = data.get("subject", {})
+    workflow = _workflow_context(data)
     tail_mode = tail_mode_from_event(data)
     safe_payload = _bounded_json(_compact_tail_payload(payload, tail_mode=tail_mode))
     safe_subject = _bounded_json(subject)
+    safe_workflow = _bounded_json(workflow)
     lines = [
         "[Async thread event]",
         f"Producer: {redact_metadata_text(producer_id)}",
@@ -52,6 +56,8 @@ def render_event_message(data: Mapping[str, Any], *, event_type: str, producer_i
     ]
     if summary:
         lines.extend(["", "Summary (untrusted):", "```text", _bounded_text(summary), "```"])
+    if workflow and safe_workflow != "{}":
+        lines.extend(["", "Workflow:", "```json", safe_workflow, "```"])
     if subject and safe_subject != "{}":
         lines.extend(["", "Subject:", "```json", safe_subject, "```"])
     if payload and safe_payload != "{}":
@@ -59,7 +65,9 @@ def render_event_message(data: Mapping[str, Any], *, event_type: str, producer_i
     return "\n".join(lines).strip()
 
 
-def tail_mode_from_event(data: Mapping[str, Any]) -> str:
+def tail_mode_from_event(data: Any) -> str:
+    if not isinstance(data, Mapping):
+        return "compact"
     payload = data.get("payload", {})
     candidates = [
         data.get("tailMode"),
@@ -72,6 +80,14 @@ def tail_mode_from_event(data: Mapping[str, Any]) -> str:
         if mode in _TAIL_MODES:
             return mode
     return "compact"
+
+
+def _workflow_context(data: Any) -> dict[str, Any]:
+    if not isinstance(data, Mapping):
+        return {}
+    keys = ("workflowId", "workflow", "stage", "artifact", "candidate", "evidence")
+    context = {key: data[key] for key in keys if key in data}
+    return context
 
 
 def _bounded_text(value: str) -> str:

@@ -8,14 +8,16 @@ from typing import Any
 from .adapter import registry_from_config, registry_path_from_config
 from .privacy import redact_metadata_text, redact_secret_text, safe_event_id
 from .registry import safe_session_key_hash
+from .workflows import WorkflowPolicy
 
 
 USAGE = """async threads (/ath)
 commands:
-  /ath listen <producer> [--events a,b] [--label text] [--policy agent_queue|direct] [--ack none|brief|debug] [--debounce seconds]
+  /ath listen <producer> [--events a,b] [--label text] [--policy agent_queue|direct] [--ack none|brief|debug] [--debounce seconds] [--gate-order review,qa] [--gate-mode serial|parallel] [--stale-on-artifact-change review,qa|all] [--candidate-required qa]
   /ath status
   /ath list
   /ath events [thread_key] [--limit N]
+  /ath workflows [thread_key] [--limit N]
   /ath inspect <thread_key>
   /ath pause <thread_key>
   /ath resume <thread_key>
@@ -74,6 +76,9 @@ def _run_command(raw_args: str, *, event: Any, gateway: Any) -> str:
     if command == "events":
         thread_key, limit = _parse_events_args(argv[1:])
         return _cmd_events(registry, thread_key=thread_key, limit=limit, owner_user_id=owner_user_id)
+    if command in {"workflows", "runs"}:
+        thread_key, limit = _parse_events_args(argv[1:])
+        return _cmd_workflows(registry, thread_key=thread_key, limit=limit, owner_user_id=owner_user_id)
     if command == "inspect" and len(argv) >= 2:
         return _cmd_inspect(registry, argv[1], owner_user_id=owner_user_id)
     if command in {"pause", "disable"} and len(argv) >= 2:
@@ -87,13 +92,17 @@ def _run_command(raw_args: str, *, event: Any, gateway: Any) -> str:
 
 def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> str:
     if not args:
-        return "usage: /ath listen <producer> [--events a,b] [--label text] [--policy agent_queue|direct] [--ack none|brief|debug] [--debounce seconds]"
+        return "usage: /ath listen <producer> [--events a,b] [--label text] [--policy agent_queue|direct] [--ack none|brief|debug] [--debounce seconds] [--gate-order review,qa] [--gate-mode serial|parallel] [--stale-on-artifact-change review,qa|all] [--candidate-required qa]"
     producer_id = args[0]
     events: list[str] = []
     label = ""
     policy = "agent_queue"
     ack_mode = "none"
     debounce_seconds = 0
+    gate_order: list[str] = []
+    gate_mode = "serial"
+    stale_on_artifact_change: list[str] = []
+    candidate_required: list[str] = []
     i = 1
     while i < len(args):
         arg = args[i]
@@ -120,6 +129,22 @@ def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> 
                 return "invalid debounce seconds. use 0-300."
             i += 2
             continue
+        if arg == "--gate-order" and i + 1 < len(args):
+            gate_order = _split_csv(args[i + 1])
+            i += 2
+            continue
+        if arg == "--gate-mode" and i + 1 < len(args):
+            gate_mode = args[i + 1].lower()
+            i += 2
+            continue
+        if arg == "--stale-on-artifact-change" and i + 1 < len(args):
+            stale_on_artifact_change = _split_csv(args[i + 1])
+            i += 2
+            continue
+        if arg == "--candidate-required" and i + 1 < len(args):
+            candidate_required = _split_csv(args[i + 1])
+            i += 2
+            continue
         return f"unknown option for /ath listen: {arg}"
 
     if ack_mode not in {"none", "brief", "debug"}:
@@ -128,8 +153,18 @@ def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> 
         ack_mode = "none"
     if debounce_seconds < 0 or debounce_seconds > 300:
         return "invalid debounce seconds. use 0-300."
+    if gate_mode not in {"serial", "parallel"}:
+        return "invalid gate mode. use one of: serial, parallel."
     if policy == "direct":
         debounce_seconds = 0
+    workflow_policy = WorkflowPolicy.from_mapping(
+        {
+            "gate_order": gate_order,
+            "gate_mode": gate_mode,
+            "stale_on_artifact_change": stale_on_artifact_change,
+            "candidate_required": candidate_required,
+        }
+    )
 
     source = event.source
     source_dict = source.to_dict() if hasattr(source, "to_dict") else dict(source)
@@ -146,6 +181,7 @@ def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> 
         owner_user_id=str(getattr(source, "user_id", "") or ""),
         ack_mode=ack_mode,
         debounce_seconds=debounce_seconds,
+        workflow_policy=workflow_policy,
     )
     url = _event_url(gateway)
     events_text = ", ".join(handle.allowed_event_types) if handle.allowed_event_types else "all events"
@@ -156,6 +192,7 @@ def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> 
         f"policy: `{handle.policy}`\n"
         f"ack: `{handle.ack_mode}`\n"
         f"debounce: `{handle.debounce_seconds}s`\n"
+        f"workflow gates: {_format_workflow_policy(handle.workflow_policy)}\n"
         f"events: {events_text}\n"
         f"url: `{url}`\n"
         f"secret: `{handle.secret}`\n"
@@ -171,13 +208,15 @@ def _cmd_status(registry: Any, *, config: Any, gateway: Any, owner_user_id: str)
     running = "yes" if getattr(adapter, "_running", False) else "unknown"
     listener_count = registry.count_handles(owner_user_id=owner_user_id or "") if owner_user_id else 0
     event_count = registry.count_recent_events(owner_user_id=owner_user_id or "") if owner_user_id else 0
+    workflow_count = registry.count_workflow_states(owner_user_id=owner_user_id or "") if owner_user_id else 0
     return (
         "async-thread status\n"
         f"receiver: `{_event_url(gateway)}` ({host}:{port})\n"
         f"running: {running}\n"
         f"registry: `{registry_path_from_config(config)}`\n"
         f"listeners: {listener_count}\n"
-        f"recent events: {event_count}"
+        f"recent events: {event_count}\n"
+        f"workflows: {workflow_count}"
     )
 
 
@@ -192,6 +231,63 @@ def _cmd_events(registry: Any, *, thread_key: str | None, limit: int, owner_user
     for event in events:
         lines.append(_format_event_row(event))
     return "\n".join(lines)
+
+
+def _cmd_workflows(registry: Any, *, thread_key: str | None, limit: int, owner_user_id: str) -> str:
+    if not owner_user_id:
+        return "no async-thread workflows for this user."
+    workflows = registry.list_workflow_states(thread_key=thread_key, owner_user_id=owner_user_id, limit=limit)
+    if not workflows:
+        suffix = f" for `{thread_key}`" if thread_key else ""
+        return f"no async-thread workflows{suffix}."
+    lines = ["async-thread workflows:"]
+    for workflow in workflows:
+        lines.append(_format_workflow_row(workflow))
+    return "\n".join(lines)
+
+
+def _split_csv(value: str) -> list[str]:
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
+def _format_workflow_policy(policy: WorkflowPolicy) -> str:
+    if not policy.gate_order:
+        return "none"
+    parts = [f"{policy.gate_mode} order={','.join(policy.gate_order)}"]
+    if policy.stale_on_artifact_change:
+        parts.append(f"stale_on_artifact_change={','.join(policy.stale_on_artifact_change)}")
+    if policy.candidate_required:
+        parts.append(f"candidate_required={','.join(policy.candidate_required)}")
+    return "; ".join(parts)
+
+
+def _format_workflow_row(workflow: Any) -> str:
+    gates = getattr(workflow, "gates", {}) or {}
+    active = gates.get("active", []) if isinstance(gates, dict) else []
+    deferred = gates.get("deferred", []) if isinstance(gates, dict) else []
+    evidence = getattr(workflow, "evidence", {}) or {}
+    evidence_bits: list[str] = []
+    if isinstance(evidence, dict):
+        for gate, item in sorted(evidence.items()):
+            if isinstance(item, dict):
+                evidence_bits.append(f"{gate}:{item.get('status', 'unknown')}")
+    candidate = getattr(workflow, "candidate", {}) or {}
+    candidate_id = candidate.get("id") if isinstance(candidate, dict) else ""
+    candidate_readiness = candidate.get("readiness") if isinstance(candidate, dict) else ""
+    candidate_text = ""
+    if candidate_id or candidate_readiness:
+        candidate_text = f" candidate={_clip(str(candidate_id or '-'), 40)}:{_clip(str(candidate_readiness or '-'), 24)}"
+    active_text = ",".join(str(item) for item in active) or "-"
+    deferred_text = ",".join(str(item) for item in deferred) or "-"
+    evidence_text = ",".join(evidence_bits) or "-"
+    summary = _clip(_redact_diagnostic_text(getattr(workflow, "last_summary", "")), 80)
+    summary_text = f" — {summary}" if summary else ""
+    return (
+        f"- {workflow.updated_at} `{workflow.thread_key}` workflow=`{_clip(workflow.workflow_id, 80)}` "
+        f"stage=`{_clip(workflow.stage or '-', 40)}`{candidate_text} "
+        f"active={active_text} deferred={deferred_text} evidence={evidence_text} "
+        f"last={_clip(workflow.last_event_type or '-', 80)} id={_short_event_id(workflow.last_event_id)}{summary_text}"
+    )
 
 
 def _parse_events_args(args: list[str]) -> tuple[str | None, int]:
@@ -253,6 +349,8 @@ def _format_event_detail(detail: dict[str, Any]) -> str:
         "debounce_seconds",
         "session_key_present",
         "session_key_hash",
+        "workflow_id",
+        "workflow_stage",
         "active_session",
         "queued",
         "handle_message_called",
@@ -307,7 +405,8 @@ def _cmd_list(registry: Any, *, owner_user_id: str) -> str:
         label = f" — {h.label}" if h.label else ""
         thread = f" thread={h.thread_id}" if h.thread_id else ""
         debounce = f" debounce={h.debounce_seconds}s" if h.debounce_seconds else ""
-        lines.append(f"- `{h.thread_key}` {state} producer=`{h.producer_id}` policy=`{h.policy}`{debounce}{thread}{label}")
+        workflow = f" workflow={_format_workflow_policy(h.workflow_policy)}" if h.workflow_policy.gate_order else ""
+        lines.append(f"- `{h.thread_key}` {state} producer=`{h.producer_id}` policy=`{h.policy}`{debounce}{workflow}{thread}{label}")
     return "\n".join(lines)
 
 
@@ -319,6 +418,8 @@ def _cmd_inspect(registry: Any, thread_key: str, *, owner_user_id: str) -> str:
     events = ", ".join(h.allowed_event_types) if h.allowed_event_types else "all"
     recent_events = registry.list_recent_events(thread_key=thread_key, owner_user_id=owner_user_id, limit=3)
     recent_text = "\n".join(_format_event_row(event) for event in recent_events) if recent_events else "none"
+    workflows = registry.list_workflow_states(thread_key=thread_key, owner_user_id=owner_user_id, limit=3)
+    workflow_text = "\n".join(_format_workflow_row(workflow) for workflow in workflows) if workflows else "none"
     session_key_state = "present" if h.session_key else "-"
     session_key_hash = safe_session_key_hash(h.session_key) or "-"
     return (
@@ -327,11 +428,13 @@ def _cmd_inspect(registry: Any, thread_key: str, *, owner_user_id: str) -> str:
         f"policy: `{h.policy}`\n"
         f"ack: `{h.ack_mode}`\n"
         f"debounce: `{h.debounce_seconds}s`\n"
+        f"workflow gates: {_format_workflow_policy(h.workflow_policy)}\n"
         f"events: {events}\n"
         f"platform/chat/thread: `{h.platform}` / `{h.chat_id}` / `{h.thread_id or '-'}`\n"
         f"sessionKey: {session_key_state} hash=`{session_key_hash}`\n"
         f"created: {h.created_at}\n"
         "secret: hidden\n"
+        f"workflows:\n{workflow_text}\n"
         f"recent events:\n{recent_text}"
     )
 

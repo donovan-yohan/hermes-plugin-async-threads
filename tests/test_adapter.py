@@ -147,6 +147,21 @@ def test_render_event_message_redacts_token_query_params_in_urls():
     assert "access_token=<redacted>" in text
 
 
+def test_render_event_message_treats_non_mapping_data_as_empty_event():
+    text = render_event_message(
+        ["not", "a", "mapping"],
+        event_type="relay.lane.progress",
+        producer_id="relay-ath-dev",
+        summary="non mapping payload",
+    )
+
+    assert "Tail mode: compact" in text
+    assert "non mapping payload" in text
+    assert "Subject:" not in text
+    assert "Payload:" not in text
+    assert "Workflow:" not in text
+
+
 def test_finished_event_defaults_to_compact_tail_without_raw_transcript():
     raw_tail = "line one\n" + "very noisy output\n" * 200 + "FINAL_SECRET=do-not-print"
     text = render_event_message(
@@ -544,6 +559,46 @@ async def test_coalesces_routine_started_progress_events_into_one_digest(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_coalesced_workflow_events_update_current_state_while_pending(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(
+        source=source.to_dict(),
+        producer_id="relay",
+        owner_user_id="u1",
+        debounce_seconds=30,
+        workflow_policy={"gate_order": ["review"]},
+    )
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+    body = {
+        "version": "async-thread-event/v1",
+        "eventId": "evt_workflow_progress_pending",
+        "eventType": "relay.lane.progress",
+        "producer": {"id": handle.producer_id},
+        "occurredAt": time.time(),
+        "asyncThread": {"threadKey": handle.thread_key},
+        "summary": "workflow progress pending",
+        "workflowId": "wf-coalesced",
+        "stage": "progress",
+        "artifact": {"kind": "git_commit", "id": "abc123"},
+    }
+
+    response = await adapter._handle_event(FakeRequest(json.dumps(body).encode(), handle.secret))
+
+    assert response.status == 202
+    assert target.handled == []
+    state = registry.get_workflow_state(thread_key=handle.thread_key, workflow_id="wf-coalesced")
+    assert state is not None
+    assert state.stage == "progress"
+    event = registry.list_recent_events(thread_key=handle.thread_key, limit=1)[0]
+    assert event.outcome == "coalesced_pending"
+    assert event.detail["workflow_id"] == "wf-coalesced"
+
+
+@pytest.mark.asyncio
 async def test_priority_failure_bypasses_debounce_and_flushes_pending_digest(tmp_path):
     config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
     adapter = AsyncThreadsAdapter(config)
@@ -744,6 +799,49 @@ async def test_dispatch_success_paths_log_metadata_from_webhook(tmp_path):
     assert direct_detail["direct_send_success"] is True
     assert direct_detail["target_platform"] == "discord"
     assert "session_key_hash" not in direct_detail
+
+
+@pytest.mark.asyncio
+async def test_webhook_updates_workflow_state_after_successful_dispatch(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(
+        source=source.to_dict(),
+        producer_id="relay",
+        owner_user_id="u1",
+        workflow_policy={"gate_order": ["review", "qa"], "candidate_required": ["qa"]},
+    )
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+    body = {
+        "version": "async-thread-event/v1",
+        "eventId": "evt_workflow_review",
+        "eventType": "job.review_passed",
+        "producer": {"id": handle.producer_id},
+        "occurredAt": time.time(),
+        "asyncThread": {"threadKey": handle.thread_key},
+        "summary": "review evidence passed",
+        "workflowId": "wf-1",
+        "stage": "review_passed",
+        "artifact": {"kind": "git_commit", "id": "abc123"},
+        "candidate": {"id": "rc1", "readiness": "forming"},
+        "evidence": {"kind": "review", "status": "passed", "url": "https://example.test/review"},
+    }
+
+    response = await adapter._handle_event(FakeRequest(json.dumps(body).encode(), handle.secret))
+
+    assert response.status == 202
+    state = registry.get_workflow_state(thread_key=handle.thread_key, workflow_id="wf-1")
+    assert state is not None
+    assert state.stage == "review_passed"
+    assert state.evidence["review"]["status"] == "passed"
+    assert state.gates["states"]["qa"]["state"] == "deferred_candidate_not_ready"
+    assert "Workflow:" in target.handled[0].text
+    event = registry.list_recent_events(thread_key=handle.thread_key, limit=1)[0]
+    assert event.detail["workflow_id"] == "wf-1"
+    assert event.detail["workflow_stage"] == "review_passed"
 
 
 @pytest.mark.asyncio

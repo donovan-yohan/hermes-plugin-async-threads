@@ -315,6 +315,7 @@ def _build_adapter_base():
                         detail=detail,
                     )
                     raise
+                self._record_workflow_state(handle, data, fields, detail)
                 self._registry.log_event(
                     producer_id=fields["producer_id"],
                     event_id=fields["event_id"],
@@ -430,6 +431,24 @@ def _build_adapter_base():
             detail["handle_message_returned"] = True
             return "agent_started", detail
 
+        def _record_workflow_state(
+            self,
+            handle: AsyncThreadHandle,
+            data: Mapping[str, Any],
+            fields: Mapping[str, str],
+            detail: dict[str, Any],
+        ) -> None:
+            try:
+                state = self._registry.update_workflow_state_from_event(handle=handle, data=data, fields=fields)
+            except Exception as exc:  # noqa: BLE001 - event was already dispatched; diagnostics must not poison retry semantics
+                logger.error("async-thread workflow state update failed: %s", type(exc).__name__)
+                detail["error"] = "workflow_state_update_failed"
+                return
+            if state is None:
+                return
+            detail["workflow_id"] = state.workflow_id
+            detail["workflow_stage"] = state.stage
+
         def _should_coalesce(
             self,
             handle: AsyncThreadHandle,
@@ -458,11 +477,13 @@ def _build_adapter_base():
                 self._coalesce_tasks[handle.thread_key] = asyncio.create_task(
                     self._flush_coalesced_after(handle.thread_key, handle.debounce_seconds)
                 )
-            return {
+            detail = {
                 "coalesced_count": len(bucket),
                 "coalesced_reason": "debounce_window",
                 "debounce_seconds": handle.debounce_seconds,
             }
+            self._record_workflow_state(handle, data, fields, detail)
+            return detail
 
         async def _flush_coalesced_after(self, thread_key: str, delay_seconds: int) -> None:
             try:
