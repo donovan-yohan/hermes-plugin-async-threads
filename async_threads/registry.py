@@ -10,14 +10,15 @@ import secrets
 import sqlite3
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from .privacy import redact_metadata_text, redact_secret_text, safe_event_id
+from .workflows import WorkflowPolicy, apply_workflow_transition, normalize_workflow_event
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SAFE_DETAIL_KEYS = {
     "ack_mode",
@@ -40,6 +41,8 @@ SAFE_DETAIL_KEYS = {
     "queued",
     "session_key_hash",
     "session_key_present",
+    "workflow_id",
+    "workflow_stage",
     "target_adapter_exists",
     "target_platform",
 }
@@ -68,6 +71,7 @@ class AsyncThreadHandle:
     owner_user_id: str = ""
     ack_mode: str = "none"
     debounce_seconds: int = 0
+    workflow_policy: WorkflowPolicy = field(default_factory=WorkflowPolicy)
     created_at: str = ""
     updated_at: str = ""
 
@@ -95,6 +99,23 @@ class AsyncThreadEventLog:
     summary: str
     created_at: str
     detail: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class AsyncThreadWorkflowState:
+    thread_key: str
+    workflow_id: str
+    stage: str
+    artifact: dict[str, Any]
+    artifact_fingerprint: str
+    candidate: dict[str, Any]
+    evidence: dict[str, Any]
+    gates: dict[str, Any]
+    last_event_id: str
+    last_event_type: str
+    last_summary: str
+    created_at: str
+    updated_at: str
 
 
 class AsyncThreadRegistry:
@@ -146,7 +167,8 @@ class AsyncThreadRegistry:
                     allowed_event_types_json text not null default '[]',
                     policy text not null default 'agent_queue',
                     ack_mode text not null default 'none',
-                    debounce_seconds integer not null default 0
+                    debounce_seconds integer not null default 0,
+                    workflow_policy_json text not null default '{}'
                 );
 
                 create index if not exists idx_async_thread_handles_owner
@@ -183,6 +205,27 @@ class AsyncThreadRegistry:
 
                 create index if not exists idx_event_log_thread_key
                     on event_log(thread_key);
+
+                create table if not exists workflow_state(
+                    thread_key text not null,
+                    workflow_id text not null,
+                    created_at text not null,
+                    updated_at text not null,
+                    current_stage text not null default '',
+                    artifact_json text not null default '{}',
+                    artifact_fingerprint text not null default '',
+                    candidate_json text not null default '{}',
+                    evidence_json text not null default '{}',
+                    gates_json text not null default '{}',
+                    last_event_id text not null default '',
+                    last_event_type text not null default '',
+                    last_summary text not null default '',
+                    primary key (thread_key, workflow_id),
+                    foreign key (thread_key) references async_thread_handles(thread_key) on delete cascade
+                );
+
+                create index if not exists idx_workflow_state_thread_updated
+                    on workflow_state(thread_key, updated_at desc);
                 """
             )
             self._migrate_schema(conn)
@@ -206,6 +249,8 @@ class AsyncThreadRegistry:
             conn.execute("alter table async_thread_handles add column ack_mode text not null default 'none'")
         if "debounce_seconds" not in handle_columns:
             conn.execute("alter table async_thread_handles add column debounce_seconds integer not null default 0")
+        if "workflow_policy_json" not in handle_columns:
+            conn.execute("alter table async_thread_handles add column workflow_policy_json text not null default '{}'")
 
     def create_handle(
         self,
@@ -220,11 +265,13 @@ class AsyncThreadRegistry:
         owner_user_id: str = "",
         ack_mode: str = "none",
         debounce_seconds: int = 0,
+        workflow_policy: WorkflowPolicy | dict[str, Any] | None = None,
     ) -> AsyncThreadHandle:
         producer_id = _clean_token(producer_id, default="default")
         policy = policy if policy in {"agent_queue", "direct"} else "agent_queue"
         ack_mode = ack_mode if ack_mode in {"none", "brief", "debug"} else "none"
         debounce_seconds = max(0, min(int(debounce_seconds or 0), 300))
+        workflow_policy_obj = workflow_policy if isinstance(workflow_policy, WorkflowPolicy) else WorkflowPolicy.from_mapping(workflow_policy)
         thread_key = f"ath_{secrets.token_urlsafe(12).replace('-', '').replace('_', '')[:16]}"
         secret = secrets.token_urlsafe(32)
         now = utc_now()
@@ -235,8 +282,8 @@ class AsyncThreadRegistry:
                 insert into async_thread_handles(
                     thread_key, created_at, updated_at, enabled, label, source_json,
                     session_key, session_id, owner_user_id, producer_id, secret,
-                    allowed_event_types_json, policy, ack_mode, debounce_seconds
-                ) values (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    allowed_event_types_json, policy, ack_mode, debounce_seconds, workflow_policy_json
+                ) values (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     thread_key,
@@ -253,6 +300,7 @@ class AsyncThreadRegistry:
                     policy,
                     ack_mode,
                     debounce_seconds,
+                    workflow_policy_obj.to_json(),
                 ),
             )
         return self.get_handle(thread_key)  # type: ignore[return-value]
@@ -392,6 +440,115 @@ class AsyncThreadRegistry:
                 ),
             )
 
+    def update_workflow_state_from_event(
+        self,
+        *,
+        handle: AsyncThreadHandle,
+        data: dict[str, Any] | Mapping[str, Any],
+        fields: Mapping[str, str],
+    ) -> AsyncThreadWorkflowState | None:
+        normalized = normalize_workflow_event(data, fields)
+        if normalized is None:
+            return None
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            previous_row = conn.execute(
+                "select * from workflow_state where thread_key = ? and workflow_id = ?",
+                (handle.thread_key, normalized["workflow_id"]),
+            ).fetchone()
+            previous = _row_to_workflow_dict(previous_row) if previous_row else None
+            state = apply_workflow_transition(
+                previous=previous,
+                event=normalized,
+                policy=handle.workflow_policy,
+                now=now,
+            )
+            created_at = previous["created_at"] if previous else now
+            conn.execute(
+                """
+                insert into workflow_state(
+                    thread_key, workflow_id, created_at, updated_at, current_stage,
+                    artifact_json, artifact_fingerprint, candidate_json, evidence_json,
+                    gates_json, last_event_id, last_event_type, last_summary
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(thread_key, workflow_id) do update set
+                    updated_at = excluded.updated_at,
+                    current_stage = excluded.current_stage,
+                    artifact_json = excluded.artifact_json,
+                    artifact_fingerprint = excluded.artifact_fingerprint,
+                    candidate_json = excluded.candidate_json,
+                    evidence_json = excluded.evidence_json,
+                    gates_json = excluded.gates_json,
+                    last_event_id = excluded.last_event_id,
+                    last_event_type = excluded.last_event_type,
+                    last_summary = excluded.last_summary
+                """,
+                (
+                    handle.thread_key,
+                    state["workflow_id"],
+                    created_at,
+                    now,
+                    state["stage"],
+                    _json_dump(state["artifact"]),
+                    state["artifact_fingerprint"],
+                    _json_dump(state["candidate"]),
+                    _json_dump(state["evidence"]),
+                    _json_dump(state["gates"]),
+                    state["last_event_id"],
+                    state["last_event_type"],
+                    state["last_summary"],
+                ),
+            )
+            row = conn.execute(
+                "select * from workflow_state where thread_key = ? and workflow_id = ?",
+                (handle.thread_key, state["workflow_id"]),
+            ).fetchone()
+        return _row_to_workflow_state(row) if row else None
+
+    def get_workflow_state(self, *, thread_key: str, workflow_id: str) -> AsyncThreadWorkflowState | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "select * from workflow_state where thread_key = ? and workflow_id = ?",
+                (thread_key, workflow_id),
+            ).fetchone()
+        return _row_to_workflow_state(row) if row else None
+
+    def list_workflow_states(
+        self,
+        *,
+        thread_key: str | None = None,
+        owner_user_id: str | None = None,
+        limit: int = 20,
+    ) -> list[AsyncThreadWorkflowState]:
+        limit = max(1, min(int(limit or 20), 50))
+        sql = "select w.* from workflow_state w"
+        params: list[Any] = []
+        clauses: list[str] = []
+        if owner_user_id:
+            sql += " join async_thread_handles h on h.thread_key = w.thread_key"
+            clauses.append("h.owner_user_id = ?")
+            params.append(owner_user_id)
+        if thread_key:
+            clauses.append("w.thread_key = ?")
+            params.append(thread_key)
+        if clauses:
+            sql += " where " + " and ".join(clauses)
+        sql += " order by w.updated_at desc, w.workflow_id desc limit ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [_row_to_workflow_state(row) for row in rows]
+
+    def count_workflow_states(self, *, owner_user_id: str | None = None) -> int:
+        sql = "select count(*) from workflow_state w"
+        params: list[Any] = []
+        if owner_user_id:
+            sql += " join async_thread_handles h on h.thread_key = w.thread_key where h.owner_user_id = ?"
+            params.append(owner_user_id)
+        with self._connect() as conn:
+            return int(conn.execute(sql, params).fetchone()[0])
+
 
 def _row_to_handle(row: sqlite3.Row) -> AsyncThreadHandle:
     return AsyncThreadHandle(
@@ -408,6 +565,7 @@ def _row_to_handle(row: sqlite3.Row) -> AsyncThreadHandle:
         owner_user_id=row["owner_user_id"],
         ack_mode=row["ack_mode"] or "none",
         debounce_seconds=int(row["debounce_seconds"] or 0),
+        workflow_policy=WorkflowPolicy.from_json(row["workflow_policy_json"] if "workflow_policy_json" in row.keys() else "{}"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -425,6 +583,56 @@ def _row_to_event(row: sqlite3.Row) -> AsyncThreadEventLog:
         created_at=row["created_at"],
         detail=_parse_detail_json(row["detail_json"]),
     )
+
+
+def _row_to_workflow_state(row: sqlite3.Row) -> AsyncThreadWorkflowState:
+    return AsyncThreadWorkflowState(
+        thread_key=row["thread_key"],
+        workflow_id=row["workflow_id"],
+        stage=row["current_stage"] or "",
+        artifact=_parse_json_object(row["artifact_json"]),
+        artifact_fingerprint=row["artifact_fingerprint"] or "",
+        candidate=_parse_json_object(row["candidate_json"]),
+        evidence=_parse_json_object(row["evidence_json"]),
+        gates=_parse_json_object(row["gates_json"]),
+        last_event_id=row["last_event_id"] or "",
+        last_event_type=row["last_event_type"] or "",
+        last_summary=row["last_summary"] or "",
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _row_to_workflow_dict(row: sqlite3.Row) -> dict[str, Any]:
+    state = _row_to_workflow_state(row)
+    return {
+        "workflow_id": state.workflow_id,
+        "stage": state.stage,
+        "artifact": state.artifact,
+        "artifact_fingerprint": state.artifact_fingerprint,
+        "candidate": state.candidate,
+        "evidence": state.evidence,
+        "gates": state.gates,
+        "last_event_id": state.last_event_id,
+        "last_event_type": state.last_event_type,
+        "last_summary": state.last_summary,
+        "created_at": state.created_at,
+        "updated_at": state.updated_at,
+    }
+
+
+def _json_dump(value: Any) -> str:
+    return json.dumps(value if isinstance(value, (dict, list)) else {}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _parse_json_object(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _event_query(

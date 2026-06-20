@@ -39,7 +39,7 @@ def test_listen_captures_current_source_and_returns_secret(tmp_path):
     event = SimpleNamespace(source=source)
 
     response = _run_command(
-        "listen relay --events relay.session.pr_opened --label chunk --ack brief --debounce 45",
+        "listen relay --events relay.session.pr_opened --label chunk --ack brief --debounce 45 --gate-order review,qa --gate-mode serial --stale-on-artifact-change review,qa --candidate-required qa",
         event=event,
         gateway=gateway,
     )
@@ -50,9 +50,12 @@ def test_listen_captures_current_source_and_returns_secret(tmp_path):
     assert "relay.session.pr_opened" in response
     assert "ack: `brief`" in response
     assert "debounce: `45s`" in response
+    assert "workflow gates: serial order=review,qa; stale_on_artifact_change=review,qa; candidate_required=qa" in response
     [handle] = AsyncThreadRegistry(registry_path).list_handles(owner_user_id="u")
     assert handle.ack_mode == "brief"
     assert handle.debounce_seconds == 45
+    assert handle.workflow_policy.gate_order == ("review", "qa")
+    assert handle.workflow_policy.candidate_required == ("qa",)
 
     direct_response = _run_command(
         "listen relay --policy direct --ack debug",
@@ -182,6 +185,23 @@ def test_status_events_and_inspect_show_owner_scoped_diagnostics(tmp_path):
         outcome="accepted",
         summary="should not leak",
     )
+    registry.update_workflow_state_from_event(
+        handle=mine,
+        fields={
+            "event_id": "evt_workflow",
+            "event_type": "job.review_passed",
+            "producer_id": "relay",
+            "thread_key": mine.thread_key,
+            "summary": "workflow updated token=bad",
+        },
+        data={
+            "workflowId": "wf-commands",
+            "stage": "review_passed",
+            "artifact": {"kind": "git_commit", "id": "abc123"},
+            "candidate": {"id": "rc1", "readiness": "forming"},
+            "evidence": {"kind": "review", "status": "passed"},
+        },
+    )
     async_adapter = SimpleNamespace(
         config=PlatformConfig(
             enabled=True,
@@ -201,6 +221,13 @@ def test_status_events_and_inspect_show_owner_scoped_diagnostics(tmp_path):
     assert f"registry: `{registry_path}`" in status
     assert "listeners: 1" in status
     assert "recent events: 2" in status
+    assert "workflows: 1" in status
+
+    workflows = _run_command("workflows --limit 5", event=event, gateway=gateway)
+    assert "wf-commands" in workflows
+    assert "stage=`review_passed`" in workflows
+    assert "review:passed" in workflows
+    assert "token=bad" not in workflows
 
     events = _run_command("events --limit 5", event=event, gateway=gateway)
     assert mine.thread_key in events

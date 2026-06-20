@@ -10,6 +10,7 @@ This repo currently ships a first MVP slice for gateway-local async-thread conti
 - Events are de-duped by `(producerId, eventId)`.
 - Idle target sessions are woken by synthetic internal `MessageEvent` injection into the stored source.
 - Active target sessions are queued into the target adapter's pending-message queue instead of interrupting the running turn.
+- Workflow-stage tracking can keep current state for generic async work: workflow id, stage, artifact/candidate, evidence, and gate status.
 - `direct` policy can send a notification without invoking the agent, but the intended dogfood path is `agent_queue`.
 
 ## Install/config shape
@@ -49,11 +50,19 @@ Acknowledgements are opt-in for `agent_queue` listeners:
 /ath listen relay --events relay.session.pr_opened --ack brief  # one compact visible notice
 /ath listen relay --events relay.session.pr_opened --ack debug  # safe diagnostic notice
 /ath listen relay --events relay.lane.started,relay.lane.progress,relay.lane.finished,relay.lane.failed --debounce 45  # coalesce routine lane noise while letting terminal states through
+/ath listen ci --events job.started,job.finished --gate-order review,qa --gate-mode serial --stale-on-artifact-change review,qa --candidate-required qa  # track generic workflow gates; QA stays deferred until a candidate is ready
 ```
 
 `--ack` is ignored for `--policy direct`; direct delivery is already visible when it succeeds.
 
 `--debounce` is optional and only applies to `agent_queue` listeners. Routine `started`/`progress` events for the same thread are held for the debounce window and delivered as one compact digest. Terminal/priority events bypass the window and flush any pending digest immediately: `finished`/completed/succeeded states, failures/errors, `blocked`, `needs_attention`, payload states/verdicts with those values, or events that explicitly request `tailMode: debug`.
+
+Workflow gate flags are generic route policy, not a built-in release process:
+
+- `--gate-order review,qa` declares named gates in order.
+- `--gate-mode serial|parallel` controls whether later gates wait for earlier gates.
+- `--stale-on-artifact-change review,qa` (or `all`) marks passed evidence stale when the artifact fingerprint changes.
+- `--candidate-required qa` defers those gates until the event candidate has `readiness: "ready"` or `"released"`.
 
 The command replies with:
 
@@ -67,13 +76,14 @@ Management and diagnostics commands:
 /ath status
 /ath list
 /ath events [thread_key] [--limit N]
+/ath workflows [thread_key] [--limit N]
 /ath inspect <thread_key>
 /ath pause <thread_key>
 /ath resume <thread_key>
 /ath revoke <thread_key>
 ```
 
-`/ath status` prints the receiver URL, live registry path, listener count, and recent event count for the current user. `/ath events` shows compact recent event rows with redacted summaries for authenticated events; rejected events do not echo producer-supplied summaries. Secrets, HMACs, tokens, cookies, raw credentials, and full payload bodies are not printed.
+`/ath status` prints the receiver URL, live registry path, listener count, recent event count, and workflow count for the current user. `/ath events` shows compact recent event rows with redacted summaries for authenticated events; rejected events do not echo producer-supplied summaries. `/ath workflows` shows current workflow state by thread/workflow id: current stage, candidate readiness, active/deferred gates, latest evidence per gate, and last event. Secrets, HMACs, tokens, cookies, raw credentials, and full payload bodies are not printed.
 
 The registry schema stores optional `event_log.detail_json` for structured diagnostics. Details are allowlisted and sanitized before persistence; unsafe keys such as `secret`, `token`, `authorization`, `cookie`, `signature`, `payload`, `body`, `raw`, and credential-like fields are omitted or redacted.
 
@@ -100,6 +110,11 @@ For producer compatibility, HTTP response bodies still use the older initial sta
   "occurredAt": "2026-06-18T12:34:56Z",
   "asyncThread": {"threadKey": "ath_..."},
   "summary": "Relay session opened a PR and is ready for review.",
+  "workflowId": "wf_feature_123",
+  "stage": "ready_for_review",
+  "artifact": {"kind": "git_commit", "id": "abc123", "version": "abc123"},
+  "candidate": {"id": "rc_feature_123", "kind": "feature", "readiness": "forming"},
+  "evidence": {"kind": "review", "status": "passed", "url": "https://example.test/review/1"},
   "subject": {"repo": "donovan-yohan/relay-ide", "pr": 123},
   "tailMode": "compact",
   "payload": {"safe": "untrusted data only"}
