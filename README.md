@@ -1,60 +1,123 @@
 # hermes-plugin-async-threads
 
-Problem statement and seed design for event-driven async thread continuation in Hermes.
+> Event-driven wakeups for existing Hermes gateway conversations, without cron polling.
 
-Hermes can already run in Discord/Telegram/etc., schedule cron jobs, receive webhooks, and deliver messages back to channels. What is missing is a first-class way for an external system like Relay to say:
+`hermes-plugin-async-threads` lets an external producer send a signed event to Hermes and target an existing conversation handle. Hermes validates the event, de-dupes it, resolves the registered async-thread handle, and either posts a direct notification or queues a bounded continuation into the same gateway session.
 
-> “Something meaningful happened for this existing conversation. Re-wake the same thread/session and continue from there.”
+## Current status
 
-Today the workaround is usually a finite quiet cron notifier that polls for state changes and delivers back to `origin`. That works, but it is gross plumbing: it wastes cycles, adds latency, creates zombie-watchdog risk, and scatters workflow visibility across scheduler state instead of keeping the working conversation as the cockpit.
+This repository is an MVP. It is useful, but it is not a blanket promise that every Hermes runtime can be resumed from every producer yet.
 
-See [`docs/PROBLEM_STATEMENT.md`](docs/PROBLEM_STATEMENT.md) for the full captured context, goals, non-goals, and proposed direction.
+| Surface | Status |
+| --- | --- |
+| Discord gateway sessions | Tested MVP path |
+| Telegram gateway sessions | Intended, needs compatibility tests |
+| Slack and other gateway adapters | Intended, unverified |
+| CLI | Producer helper only; no `listen here` listener UX |
+| Hermes Desktop/API server | Unverified |
+| Multi-gateway or multi-profile routing | Unsupported in the MVP; receiver assumes the target adapter is connected in the same gateway process/profile |
 
-## Working name
+Known technical debt is tracked in the public-release readiness epic: https://github.com/donovan-yohan/hermes-plugin-async-threads/issues/33
 
-`hermes-plugin-async-threads`
+## What problem does this solve?
 
-The name is intentionally about **async continuation of conversation threads**, not Relay specifically. Relay is the motivating dogfood producer, but the receiver pattern should apply to GitHub, CI, home automation, long-running agent sessions, and any event source that wants to resume a specific Hermes conversation.
+Hermes can already run in gateway conversations and scheduled jobs can deliver back to an origin. The awkward workaround for long-running external work is a watcher or cron job that repeatedly polls until something changes.
 
-## Core idea
+Async threads invert that. The external system emits a signed event only when something meaningful happens, and Hermes wakes the mapped conversation.
 
-An external producer sends a signed event with a stable async-thread key:
+Good fits:
+
+- CI or deploy jobs reporting completion;
+- long-running local scripts or background agents;
+- GitHub or repository automation;
+- home automation alerts;
+- workflow/control-plane systems that should notify or resume a Hermes conversation without learning chat-platform APIs.
+
+## How it works
+
+1. A user creates a listener from an existing Hermes gateway conversation with `/ath listen`.
+2. The plugin stores a durable `threadKey`, the captured Hermes `SessionSource`, allowed producer/event scope, policy, and a per-handle HMAC secret.
+3. A producer sends `async-thread-event/v1` JSON to `POST /async-threads/v1/events` and signs the exact request body.
+4. The receiver validates timestamp, route scope, HMAC, and de-dupe state.
+5. Policy chooses either direct delivery or `agent_queue` continuation.
+6. Event summary, subject, and payload are rendered as untrusted data before entering the agent session.
+
+## Quickstart
+
+See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for install/config and a complete signed demo event.
+
+Minimal listener example from a supported Hermes gateway conversation:
+
+```text
+/ath listen demo --events demo.job.finished --ack brief
+```
+
+Minimal event envelope:
 
 ```json
 {
-  "eventId": "evt_...",
-  "eventType": "relay.session.pr_opened",
-  "asyncThread": {
-    "sessionId": "...",
-    "platform": "discord",
-    "chatId": "...",
-    "threadId": "..."
-  },
-  "summary": "#980 opened PR #123 and is ready for review",
-  "payload": {}
+  "version": "async-thread-event/v1",
+  "eventId": "demo-001",
+  "eventType": "demo.job.finished",
+  "producer": {"id": "demo"},
+  "occurredAt": "2026-06-20T19:00:00Z",
+  "asyncThread": {"threadKey": "ath_..."},
+  "summary": "demo job finished",
+  "payload": {"status": "passed", "artifact": "build-123"}
 }
 ```
 
-Hermes receives it, de-dupes it, restores enough origin/session context, runs a bounded agent prompt or direct-delivery policy, and posts back into the same thread.
+Sign the exact JSON request body with:
 
-## Status
+```text
+X-Hermes-Signature-256: sha256=<hmac_sha256_hex(body, secret)>
+```
 
-MVP implementation includes:
+## Security model
 
-- plugin-local async-thread registry;
-- `/ath listen/list/inspect/status/events/pause/resume/revoke` gateway commands;
+- Producers must authenticate with per-handle HMAC-SHA256 secrets.
+- Events include timestamps and are rejected outside the replay window.
+- Events are de-duped by producer/event id.
+- Producers are scoped by listener handle and optional allowed event types.
+- Payload text is data, not a user instruction.
+- Raw logs/transcripts should not be placed in event payloads; use compact state and log paths.
+- The MVP stores per-handle HMAC secrets in plugin-local SQLite because the receiver needs to validate inbound events.
+- The generated secret is shown once when the listener is created; treat that chat surface as sensitive.
+
+See [`docs/SECURITY.md`](docs/SECURITY.md) for more detail.
+
+## Current implementation features
+
+- plugin-local SQLite async-thread registry;
+- `/ath listen/list/inspect/status/events/workflows/pause/resume/revoke` gateway commands;
 - `async_threads` gateway platform receiver;
 - signed `async-thread-event/v1` HTTP endpoint;
 - de-dupe by producer/event id;
 - idle-session wake and active-session queue behavior;
-- privacy-safe dispatch diagnostics and opt-in `agent_queue` acknowledgements;
-- compact long-running lane event rendering with `tailMode: none | compact | debug` so raw tails are opt-in and capped;
-- optional listener debounce/coalescing for routine same-thread lane updates;
-- generic workflow-stage/candidate/evidence state tracking with serial/parallel gate policy;
-- a profile-lane producer helper for compact background-lane `started`/`progress`/`finished`/`failed` events.
+- privacy-safe dispatch diagnostics;
+- opt-in `agent_queue` acknowledgements;
+- compact long-running event rendering with `tailMode: none | compact | debug`;
+- optional debounce/coalescing for routine same-thread updates;
+- generic workflow-stage/candidate/evidence tracking with serial/parallel gate policy;
+- producer helper script for compact background-lane events.
 
-See [`docs/MVP_USAGE.md`](docs/MVP_USAGE.md) for install/config and test-event shape.
+## Known limitations
+
+- Gateway-local MVP: dispatch assumes the target platform adapter is connected in the same gateway process/profile.
+- Non-Discord gateway routing is intended but not yet backed by compatibility tests.
+- Direct delivery and acknowledgement metadata currently use a small metadata shape and need a stable platform-aware continuation helper.
+- Active-session queueing currently relies on Hermes gateway/adapter internals.
+- CLI and Hermes Desktop cannot create a listener from “here” yet.
+- Coalesced event retry semantics and unauthenticated diagnostic persistence are tracked for hardening before public shareout.
+
+## Development
+
+The repo is a Hermes plugin, not a standalone bot. Tests need Hermes gateway modules available. The local test harness auto-detects a sibling or profile-local Hermes checkout when present; set `HERMES_AGENT_PATH=/path/to/hermes-agent` if needed.
+
+```bash
+uv run pytest -q
+```
 
 ## License
 
-MIT, unless changed before implementation.
+MIT — see [`LICENSE`](LICENSE).

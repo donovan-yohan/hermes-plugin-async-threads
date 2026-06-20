@@ -2,7 +2,7 @@
 
 ## Background
 
-Hermes is already useful as a multi-platform conversational agent: a user can work with Ebi/Hermes in a Discord thread, Telegram topic, CLI session, or another gateway surface. Hermes also has durable systems like cron, webhooks, background tasks, delegation, and Kanban.
+Hermes is already useful as a multi-platform conversational agent: a user can work with Hermes in a Discord thread, Telegram topic, CLI session, or another gateway surface. Hermes also has durable systems like cron, webhooks, background tasks, delegation, and workflow tooling.
 
 Relay is becoming a live workbench/control plane for agent sessions, terminals, nodes, work contexts, GitHub work, handoffs, and cross-device execution. Relay can observe meaningful state changes that should pull the operator back into the same conversation: a Claude Code TUI opened a PR, a session became idle, an agent hit a permission prompt, a node paired, a WorkContext artifact was published, a long-running workflow finished, or a remote node went offline.
 
@@ -25,22 +25,17 @@ The desired behavior is:
 
 Today, cron has convenient `deliver: origin` semantics, but webhook-triggered runs and arbitrary external events do not have an equally ergonomic “resume this exact working thread” surface. Webhooks can trigger agent runs, and Hermes can deliver to platforms, but the missing abstraction is an **async thread**: a durable routing + context handle that external producers can target without hand-configuring a static channel for every workflow.
 
-## Motivating dogfood scenario
+## Motivating scenario
 
-During Relay work on clean node pairing UX, Ebi launched Relay-owned Claude Code TUI ultracode sessions for two first-wave implementation chunks:
+A user starts long-running work from a gateway conversation. The work runs outside the chat surface: a CI job, repository automation task, local script, background agent session, or deployment process. When that work reaches a meaningful transition, the desired workflow is:
 
-- issue #980: Add Node / Pair Device UX spec;
-- issue #981: key-bound node identity / credential handshake.
+1. keep the original Hermes conversation as the operator cockpit;
+2. let the external producer work independently;
+3. send a signed event when the work needs attention;
+4. have Hermes resolve the existing conversation and either post a direct notification or queue a bounded continuation;
+5. avoid polling loops and hardcoded chat-platform delivery code in the producer.
 
-The desired workflow was:
-
-1. stay in the same Discord thread with Kyle;
-2. let Relay-owned Claude sessions work independently;
-3. when a PR appears, signal back into this same thread;
-4. have Ebi continue orchestration from the same context and route chunk review;
-5. defer full QA until the whole epic ships.
-
-The workaround was a finite quiet cron job that polls GitHub branches for open PRs and posts only when it sees them. That avoided chat spam, but it still added polling, scheduler state, and lifecycle cleanup burden.
+The workaround is a finite quiet cron job that polls external state and posts only when it sees a transition. That avoids chat spam, but it still adds polling, scheduler state, and lifecycle cleanup burden.
 
 A better system would let Relay emit:
 
@@ -89,7 +84,7 @@ Not every event should blindly launch an expensive agent run. A route should be 
 
 ### 5. Producer-agnostic receiver
 
-Relay is the first dogfood producer, but the Hermes plugin should not be Relay-only. It should work for:
+Relay is one motivating producer, but the Hermes plugin should not be Relay-only. It should work for:
 
 - Relay session/workcontext/node events;
 - GitHub PR/check events;
@@ -159,8 +154,8 @@ Routes should declare max turn count, toolsets, model/budget, direct-delivery vs
   "eventId": "evt_01J...",
   "eventType": "relay.session.pr_opened",
   "producer": {
-    "id": "relay-devbox-hub",
-    "kind": "relay",
+    "id": "demo-producer",
+    "kind": "ci",
     "signature": "..."
   },
   "occurredAt": "2026-06-18T12:34:56Z",
@@ -177,13 +172,12 @@ Routes should declare max turn count, toolsets, model/budget, direct-delivery vs
     "priority": "normal"
   },
   "subject": {
-    "repo": "donovan-yohan/relay-ide",
-    "issue": 980,
+    "repo": "example/repo",
     "pr": 123,
-    "workContextId": "wc:relay-...",
-    "externalSessionId": "225b0233b696414e"
+    "workflowId": "wf_demo_123",
+    "externalSessionId": "external-run-123"
   },
-  "summary": "#980 opened PR #123 and is ready for chunk review.",
+  "summary": "demo workflow opened PR 123 and is ready for review.",
   "payload": {
     "safe": "producer-specific JSON only; treated as untrusted data"
   }
@@ -264,7 +258,7 @@ A useful MVP can be small:
 3. De-dupe by `producerId + eventId`.
 4. Direct delivery mode into the registered origin thread.
 5. Agent-continuation mode with a bounded prompt and restricted toolsets.
-6. One Relay dogfood producer: PR opened / session idle / needs attention.
+6. One producer example: job finished / needs attention / blocked.
 7. CLI command to register/list/revoke async threads.
 8. Tests for signature validation, de-dupe, prompt injection boundary, origin routing, and fallback behavior.
 
