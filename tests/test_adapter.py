@@ -894,7 +894,7 @@ async def test_direct_send_exception_logs_metadata_without_leaking_session_key(t
 
 
 @pytest.mark.asyncio
-async def test_auth_failures_use_generic_unauthorized_response(tmp_path):
+async def test_auth_failures_use_generic_unauthorized_response_without_unauthenticated_event_logs(tmp_path):
     config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
     adapter = AsyncThreadsAdapter(config)
     registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
@@ -909,6 +909,9 @@ async def test_auth_failures_use_generic_unauthorized_response(tmp_path):
         raw = json.dumps(body).encode()
         return await adapter._handle_event(FakeRequest(raw, secret))
 
+    def event_count() -> int:
+        return len(registry.list_recent_events(limit=20))
+
     base = {
         "version": "async-thread-event/v1",
         "eventId": "evt_auth",
@@ -919,31 +922,51 @@ async def test_auth_failures_use_generic_unauthorized_response(tmp_path):
         "summary": "auth probe",
     }
 
-    wrong_thread = {**base, "asyncThread": {"threadKey": "ath_missing"}}
-    wrong_producer = {**base, "eventId": "evt_auth_2", "producer": {"id": "other"}}
-    wrong_type = {**base, "eventId": "evt_auth_3", "eventType": "relay.session.other"}
-
-    responses = [
-        await post(wrong_thread, "wrong-secret"),
-        await post(wrong_producer, handle.secret),
-        await post(wrong_type, handle.secret),
-        await post({**base, "eventId": "evt_auth_4"}, "wrong-secret"),
+    unauthenticated_probes = [
+        ({**base, "asyncThread": {"threadKey": "ath_missing"}}, "wrong-secret"),
+        ({**base, "eventId": "evt_auth_bad_sig"}, "wrong-secret"),
+        ({**base, "eventId": "evt_auth_wrong_producer_bad_sig", "producer": {"id": "other"}}, "wrong-secret"),
+        ({**base, "eventId": "evt_auth_wrong_type_bad_sig", "eventType": "relay.session.other"}, "wrong-secret"),
     ]
-    registry.set_enabled(handle.thread_key, False)
-    responses.append(await post({**base, "eventId": "evt_auth_5"}, handle.secret))
+    for body, secret in unauthenticated_probes:
+        before = event_count()
+        response = await post(body, secret)
+        assert response.status == 401
+        assert json.loads(response.text)["error"] == "invalid signature"
+        assert event_count() == before
 
-    assert [response.status for response in responses] == [401] * 5
-    assert [json.loads(response.text)["error"] for response in responses] == ["invalid signature"] * 5
+    wrong_producer = {**base, "eventId": "evt_auth_wrong_producer", "producer": {"id": "other"}}
+    wrong_type = {**base, "eventId": "evt_auth_wrong_type", "eventType": "relay.session.other"}
+    authenticated_rejections = [await post(wrong_producer, handle.secret), await post(wrong_type, handle.secret)]
+
+    assert [response.status for response in authenticated_rejections] == [401, 401]
+    assert [json.loads(response.text)["error"] for response in authenticated_rejections] == ["invalid signature"] * 2
     events = registry.list_recent_events(thread_key=handle.thread_key, limit=10)
-    detail_by_event_id = {event.event_id: event.detail for event in events}
-    assert detail_by_event_id["evt_auth_3"] == {
+    detail_by_event_id = {event.event_id: event for event in events}
+    assert detail_by_event_id["evt_auth_wrong_producer"].outcome == "rejected_producer_scope"
+    assert detail_by_event_id["evt_auth_wrong_producer"].detail == {
         "handle_enabled": True,
         "policy": "agent_queue",
         "target_platform": "discord",
     }
-    assert detail_by_event_id["evt_auth_4"] == {
+    assert detail_by_event_id["evt_auth_wrong_type"].outcome == "rejected_event_type"
+    assert detail_by_event_id["evt_auth_wrong_type"].detail == {
         "handle_enabled": True,
         "policy": "agent_queue",
         "target_platform": "discord",
     }
-    assert detail_by_event_id["evt_auth_5"] == {"handle_enabled": False}
+
+    before_disabled = event_count()
+    registry.set_enabled(handle.thread_key, False)
+    disabled_bad_sig = await post({**base, "eventId": "evt_auth_disabled_bad_sig"}, "wrong-secret")
+    assert disabled_bad_sig.status == 401
+    assert json.loads(disabled_bad_sig.text)["error"] == "invalid signature"
+    assert event_count() == before_disabled
+
+    disabled_response = await post({**base, "eventId": "evt_auth_disabled"}, handle.secret)
+    assert disabled_response.status == 401
+    assert json.loads(disabled_response.text)["error"] == "invalid signature"
+    disabled_event = registry.list_recent_events(thread_key=handle.thread_key, limit=1)[0]
+    assert disabled_event.event_id == "evt_auth_disabled"
+    assert disabled_event.outcome == "rejected_missing_or_disabled_handle"
+    assert disabled_event.detail == {"handle_enabled": False}
