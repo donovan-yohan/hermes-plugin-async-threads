@@ -214,7 +214,11 @@ def _build_adapter_base():
                     replay_window_seconds=self._replay_window_seconds,
                 )
                 handle = self._registry.get_handle(fields["thread_key"])
-                if handle is None or not handle.enabled:
+                if handle is None:
+                    return web.json_response({"error": "invalid signature"}, status=401)
+                if not verify_hmac_signature(raw, handle.secret, signature_header(request.headers)):
+                    return web.json_response({"error": "invalid signature"}, status=401)
+                if not handle.enabled:
                     self._registry.log_event(
                         producer_id=fields["producer_id"],
                         event_id=fields["event_id"],
@@ -243,17 +247,6 @@ def _build_adapter_base():
                         thread_key=fields["thread_key"],
                         event_type=fields["event_type"],
                         outcome="rejected_event_type",
-                        summary=fields["summary"],
-                        detail={"handle_enabled": handle.enabled, "policy": handle.policy, "target_platform": handle.platform},
-                    )
-                    return web.json_response({"error": "invalid signature"}, status=401)
-                if not verify_hmac_signature(raw, handle.secret, signature_header(request.headers)):
-                    self._registry.log_event(
-                        producer_id=fields["producer_id"],
-                        event_id=fields["event_id"],
-                        thread_key=fields["thread_key"],
-                        event_type=fields["event_type"],
-                        outcome="rejected_signature",
                         summary=fields["summary"],
                         detail={"handle_enabled": handle.enabled, "policy": handle.policy, "target_platform": handle.platform},
                     )

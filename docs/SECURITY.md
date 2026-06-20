@@ -44,11 +44,12 @@ Prefer compact state fields and external log paths. Use `tailMode: compact` or `
 
 The MVP stores per-handle HMAC secrets in plugin-local SQLite because the receiver needs to validate inbound events. Operator-facing command output hides stored secrets after creation.
 
+Authenticated accepted events, duplicates, dispatch failures, and authenticated scope or disabled-handle rejections may write sanitized event-log rows. Unauthenticated probes are rejected with generic responses and are not persisted as event-log rows.
+
 ## Current hardening work
 
 The public-release readiness epic tracks remaining hardening before broad shareout:
 
-- avoid persistent event-log writes from unauthenticated probes;
 - make coalesced event retry/de-dupe semantics final-delivery-safe;
 - add more compatibility evidence before claiming non-Discord gateway support.
 
