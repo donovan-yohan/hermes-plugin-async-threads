@@ -133,6 +133,8 @@ With `--ack brief`, the mapped gateway conversation should also receive a compac
 
 ## Event fields
 
+This section shows the short version. The complete producer-facing contract is [`EVENT_CONTRACT.md`](EVENT_CONTRACT.md), with a permissive JSON Schema at [`schemas/async-thread-event-v1.schema.json`](schemas/async-thread-event-v1.schema.json).
+
 Required fields:
 
 ```json
@@ -154,7 +156,7 @@ Recommended fields:
 - `tailMode`: `compact`, `none`, or `debug`.
 - `workflowId`, `stage`, `artifact`, `candidate`, `evidence`: optional workflow-state fields.
 
-Payload text is untrusted data. Do not put raw logs, transcripts, secrets, terminal bytes, or user-authored instructions in event payloads.
+Payload text is untrusted data. Do not put raw logs, transcripts, secrets, terminal bytes, or user-authored instructions in event payloads. Use the bridge/generator checklist in [`EVENT_CONTRACT.md`](EVENT_CONTRACT.md) when building a producer.
 
 ## Compact long-running event pattern
 
