@@ -559,6 +559,85 @@ async def test_coalesces_routine_started_progress_events_into_one_digest(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_coalesced_retry_during_failed_flush_is_not_final_duplicate(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    adapter._running = True
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", debounce_seconds=30)
+    body = _event_body(handle, "evt_progress_retrying", "relay.lane.progress", "lane retrying", {"lane": "lane-a"})
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: FakeTargetAdapter(fail_handle=True)})
+
+    first = await adapter._handle_event(FakeRequest(body, handle.secret))
+    await adapter._flush_coalesced(handle.thread_key, reason="test_failure")
+    retry_while_requeued = await adapter._handle_event(FakeRequest(body, handle.secret))
+
+    assert first.status == 202
+    assert retry_while_requeued.status == 202
+    assert json.loads(retry_while_requeued.text)["status"] == "queued"
+    events = registry.list_recent_events(thread_key=handle.thread_key, limit=10)
+    assert events[0].outcome == "dispatch_failed"
+    assert not any(event.outcome == "duplicate" for event in events)
+
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+    await adapter._flush_coalesced(handle.thread_key, reason="retry_success")
+    duplicate_after_delivery = await adapter._handle_event(FakeRequest(body, handle.secret))
+
+    assert len(target.handled) == 1
+    assert json.loads(duplicate_after_delivery.text)["status"] == "duplicate"
+
+
+@pytest.mark.asyncio
+async def test_coalesced_retry_during_inflight_failed_flush_is_not_final_duplicate(tmp_path):
+    class SlowFailTargetAdapter(FakeTargetAdapter):
+        def __init__(self):
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def handle_message(self, event):
+            self.entered.set()
+            await self.release.wait()
+            raise RuntimeError("slow digest failure")
+
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    adapter._running = True
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", debounce_seconds=30)
+    body = _event_body(handle, "evt_progress_inflight", "relay.lane.progress", "lane inflight", {"lane": "lane-a"})
+    slow_target = SlowFailTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: slow_target})
+
+    first = await adapter._handle_event(FakeRequest(body, handle.secret))
+    flush_task = asyncio.create_task(adapter._flush_coalesced(handle.thread_key, reason="inflight_failure"))
+    await slow_target.entered.wait()
+    retry_during_inflight = await adapter._handle_event(FakeRequest(body, handle.secret))
+
+    assert first.status == 202
+    assert retry_during_inflight.status == 202
+    assert json.loads(retry_during_inflight.text)["status"] == "queued"
+    assert not any(event.outcome == "duplicate" for event in registry.list_recent_events(thread_key=handle.thread_key, limit=10))
+
+    slow_target.release.set()
+    await flush_task
+    events = registry.list_recent_events(thread_key=handle.thread_key, limit=10)
+    assert events[0].outcome == "dispatch_failed"
+    assert not any(event.outcome == "duplicate" for event in events)
+
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+    await adapter._flush_coalesced(handle.thread_key, reason="retry_success")
+    duplicate_after_delivery = await adapter._handle_event(FakeRequest(body, handle.secret))
+
+    assert len(target.handled) == 1
+    assert json.loads(duplicate_after_delivery.text)["status"] == "duplicate"
+
+
+@pytest.mark.asyncio
 async def test_coalesced_workflow_events_update_current_state_while_pending(tmp_path):
     config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
     adapter = AsyncThreadsAdapter(config)

@@ -156,6 +156,7 @@ def _build_adapter_base():
                 (config.extra or {}).get("replay_window_seconds", DEFAULT_REPLAY_WINDOW_SECONDS)
             )
             self._coalesced_events: dict[str, list[dict[str, Any]]] = {}
+            self._coalesced_inflight: dict[str, list[dict[str, Any]]] = {}
             self._coalesce_tasks: dict[str, asyncio.Task] = {}
 
         async def connect(self) -> bool:
@@ -182,7 +183,7 @@ def _build_adapter_base():
                 self._runner = None
             for task in list(self._coalesce_tasks.values()):
                 task.cancel()
-            for pending in list(self._coalesced_events.values()):
+            for pending in list(self._coalesced_events.values()) + list(self._coalesced_inflight.values()):
                 for item in pending:
                     self._registry.forget_seen(
                         producer_id=item["fields"]["producer_id"],
@@ -190,6 +191,7 @@ def _build_adapter_base():
                     )
             self._coalesce_tasks.clear()
             self._coalesced_events.clear()
+            self._coalesced_inflight.clear()
 
         async def send(self, chat_id: str, content: str, reply_to=None, metadata=None):
             return SendResult(success=False, error="async_threads is an ingress-only platform")
@@ -256,6 +258,12 @@ def _build_adapter_base():
                     event_id=fields["event_id"],
                     thread_key=fields["thread_key"],
                 ):
+                    if self._pending_coalesced_contains(
+                        thread_key=fields["thread_key"],
+                        producer_id=fields["producer_id"],
+                        event_id=fields["event_id"],
+                    ):
+                        return web.json_response({"status": "queued", "threadKey": handle.thread_key}, status=202)
                     self._registry.log_event(
                         producer_id=fields["producer_id"],
                         event_id=fields["event_id"],
@@ -458,6 +466,14 @@ def _build_adapter_base():
         def _has_pending_coalesced(self, handle: AsyncThreadHandle) -> bool:
             return bool(self._coalesced_events.get(handle.thread_key))
 
+        def _pending_coalesced_contains(self, *, thread_key: str, producer_id: str, event_id: str) -> bool:
+            for coalesced in (self._coalesced_events, self._coalesced_inflight):
+                for item in coalesced.get(thread_key, []):
+                    fields = item.get("fields", {})
+                    if fields.get("producer_id") == producer_id and fields.get("event_id") == event_id:
+                        return True
+            return False
+
         def _queue_coalesced_event(
             self,
             handle: AsyncThreadHandle,
@@ -491,47 +507,51 @@ def _build_adapter_base():
             pending = self._pop_coalesced(thread_key)
             if not pending:
                 return
+            self._coalesced_inflight[thread_key] = pending
             handle = pending[-1]["handle"]
             data, fields = self._coalesced_digest(pending, reason=reason)
             try:
-                outcome, detail = await self.dispatch_event(handle, data, fields)
-            except Exception as exc:  # noqa: BLE001
-                detail = dict(getattr(exc, "detail", {}) or {})
-                detail.update(
-                    {
-                        "coalesced_count": len(pending),
-                        "coalesced_reason": reason,
-                        "exception_class": type(exc).__name__,
-                        "exception_message": str(exc),
-                    }
-                )
+                try:
+                    outcome, detail = await self.dispatch_event(handle, data, fields)
+                except Exception as exc:  # noqa: BLE001
+                    detail = dict(getattr(exc, "detail", {}) or {})
+                    detail.update(
+                        {
+                            "coalesced_count": len(pending),
+                            "coalesced_reason": reason,
+                            "exception_class": type(exc).__name__,
+                            "exception_message": str(exc),
+                        }
+                    )
+                    self._registry.log_event(
+                        producer_id=fields["producer_id"],
+                        event_id=fields["event_id"],
+                        thread_key=fields["thread_key"],
+                        event_type=fields["event_type"],
+                        outcome="dispatch_failed",
+                        summary=fields["summary"],
+                        detail=detail,
+                    )
+                    if self._requeue_failed_coalesced(thread_key, pending, handle):
+                        return
+                    for item in pending:
+                        self._registry.forget_seen(
+                            producer_id=item["fields"]["producer_id"],
+                            event_id=item["fields"]["event_id"],
+                        )
+                    return
+                detail.update({"coalesced_count": len(pending), "coalesced_reason": reason})
                 self._registry.log_event(
                     producer_id=fields["producer_id"],
                     event_id=fields["event_id"],
                     thread_key=fields["thread_key"],
                     event_type=fields["event_type"],
-                    outcome="dispatch_failed",
+                    outcome=outcome,
                     summary=fields["summary"],
                     detail=detail,
                 )
-                if self._requeue_failed_coalesced(thread_key, pending, handle):
-                    return
-                for item in pending:
-                    self._registry.forget_seen(
-                        producer_id=item["fields"]["producer_id"],
-                        event_id=item["fields"]["event_id"],
-                    )
-                return
-            detail.update({"coalesced_count": len(pending), "coalesced_reason": reason})
-            self._registry.log_event(
-                producer_id=fields["producer_id"],
-                event_id=fields["event_id"],
-                thread_key=fields["thread_key"],
-                event_type=fields["event_type"],
-                outcome=outcome,
-                summary=fields["summary"],
-                detail=detail,
-            )
+            finally:
+                self._coalesced_inflight.pop(thread_key, None)
 
         def _pop_coalesced(self, thread_key: str) -> list[dict[str, Any]]:
             task = self._coalesce_tasks.pop(thread_key, None)
