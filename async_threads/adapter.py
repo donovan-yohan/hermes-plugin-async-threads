@@ -566,9 +566,12 @@ def _build_adapter_base():
                 return False
             for item in pending:
                 item["attempts"] = attempts
-            self._coalesced_events[thread_key] = pending
+            queued_during_flush = self._coalesced_events.pop(thread_key, [])
+            self._coalesced_events[thread_key] = pending + queued_during_flush
             delay = max(1, min(handle.debounce_seconds or 1, 30))
-            self._coalesce_tasks[thread_key] = asyncio.create_task(self._flush_coalesced_after(thread_key, delay))
+            task = self._coalesce_tasks.get(thread_key)
+            if task is None or task.done():
+                self._coalesce_tasks[thread_key] = asyncio.create_task(self._flush_coalesced_after(thread_key, delay))
             return True
 
         def _coalesced_digest(self, pending: list[dict[str, Any]], *, reason: str) -> tuple[dict[str, Any], dict[str, str]]:
