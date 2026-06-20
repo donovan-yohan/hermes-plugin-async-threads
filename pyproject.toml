@@ -26,8 +26,11 @@ dev = [
   "PyYAML>=6",
 ]
 
+[project.entry-points."hermes_agent.plugins"]
+async-threads = "hermes_plugin_async_threads"
+
 [tool.setuptools]
-packages = ["async_threads"]
+packages = ["async_threads", "hermes_plugin_async_threads"]
 py-modules = []
 
 [tool.pytest.ini_options]

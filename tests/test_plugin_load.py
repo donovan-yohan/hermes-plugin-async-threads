@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 
 from gateway.config import PlatformConfig
+from gateway.platform_registry import PlatformEntry, platform_registry
 
 
 class FakePluginContext:
@@ -32,6 +33,24 @@ def _load_root_plugin():
     return module
 
 
+def _ensure_async_threads_platform_registered(adapter_factory):
+    if not platform_registry.is_registered("async_threads"):
+        platform_registry.register(
+            PlatformEntry(
+                name="async_threads",
+                label="Async Threads",
+                adapter_factory=adapter_factory,
+                check_fn=lambda: True,
+            )
+        )
+
+
+def test_pip_entrypoint_module_exposes_register():
+    import hermes_plugin_async_threads
+
+    assert callable(hermes_plugin_async_threads.register)
+
+
 def test_root_plugin_registers_platform_hook_and_command():
     plugin = _load_root_plugin()
     ctx = FakePluginContext()
@@ -48,6 +67,7 @@ def test_root_plugin_registers_platform_hook_and_command():
     assert platform["validate_config"](PlatformConfig(enabled=True, extra={"port": "8765"})) is True
     assert platform["validate_config"](PlatformConfig(enabled=True, extra={"port": "bad"})) is False
 
+    _ensure_async_threads_platform_registered(platform["adapter_factory"])
     adapter = platform["adapter_factory"](PlatformConfig(enabled=True, extra={"port": 0}))
     assert adapter.platform.value == "async_threads"
 

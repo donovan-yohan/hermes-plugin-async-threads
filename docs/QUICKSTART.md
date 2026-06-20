@@ -11,7 +11,9 @@ This quickstart exercises the current gateway-local MVP. It assumes a Hermes gat
 
 ## Enable the plugin
 
-Install or copy the plugin into the Hermes profile's plugin directory, then enable the plugin and platform adapter in the profile config.
+For a source checkout/directory install, copy or clone this repository into the active Hermes profile's plugin directory so the plugin directory contains both `plugin.yaml` and root `__init__.py`. Then enable the plugin and platform adapter in the profile config.
+
+The project also declares a `hermes_agent.plugins` entry point for packaged installs, but source checkout/copy is the most explicit path until a published package exists.
 
 ```yaml
 plugins:
