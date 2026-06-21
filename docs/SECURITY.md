@@ -48,12 +48,14 @@ The MVP stores per-handle HMAC secrets in plugin-local SQLite because the receiv
 
 Authenticated accepted events, duplicates, dispatch failures, and authenticated scope or disabled-handle rejections may write sanitized event-log rows. Unauthenticated probes are rejected with generic responses and are not persisted as event-log rows.
 
+Use `/ath prune` to dry-run or apply owner-scoped cleanup for old event-log rows and replay/de-dupe markers. Defaults can be set with `event_log_retention_days` and `seen_event_retention_days` in the `async_threads` platform config. Keep seen-event retention longer than the operational retry window you want to protect.
+
 ## Current hardening work
 
 The public-release readiness epic tracks remaining hardening before broad shareout:
 
 - add live non-Discord gateway smoke evidence before claiming end-to-end support beyond metadata routing coverage.
 - replace private gateway/adapter coupling with the stable continuation API proposed in [`docs/design/STABLE_CONTINUATION_API.md`](design/STABLE_CONTINUATION_API.md).
-- add retention/pruning for old de-dupe and event-log rows ([#48](https://github.com/donovan-yohan/hermes-plugin-async-threads/issues/48)).
+- expand retention automation beyond the explicit owner-scoped `/ath prune` command if real-world usage requires background cleanup.
 
 See https://github.com/donovan-yohan/hermes-plugin-async-threads/issues/33

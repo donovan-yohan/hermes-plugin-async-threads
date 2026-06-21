@@ -68,10 +68,15 @@ Useful management commands:
 /ath status
 /ath list
 /ath events [thread_key] [--limit N]
+/ath trace <event_id> [--json]
 /ath workflows [thread_key] [--limit N]
 /ath inspect <thread_key>
+/ath emit-command <thread_key> --event event.type [--summary text]
+/ath lifecycle [thread_key]
+/ath prune [--dry-run|--force] [--event-log-days N] [--seen-days N]
 /ath pause <thread_key>
 /ath resume <thread_key>
+/ath retire <thread_key>
 /ath revoke <thread_key>
 ```
 
@@ -133,7 +138,7 @@ With `--ack brief`, the mapped gateway conversation should also receive a compac
 
 ## Event fields
 
-This section shows the short version. The complete producer-facing contract is [`EVENT_CONTRACT.md`](EVENT_CONTRACT.md), with a permissive JSON Schema at [`schemas/async-thread-event-v1.schema.json`](schemas/async-thread-event-v1.schema.json).
+This section shows the short version. The complete producer-facing contract is [`EVENT_CONTRACT.md`](EVENT_CONTRACT.md), with a permissive JSON Schema at [`schemas/async-thread-event-v1.schema.json`](schemas/async-thread-event-v1.schema.json). Bridge and operator recipes live in [`BRIDGE_RECIPES.md`](BRIDGE_RECIPES.md).
 
 Required fields:
 
@@ -155,6 +160,7 @@ Recommended fields:
 - `payload`: compact producer-specific data.
 - `tailMode`: `compact`, `none`, or `debug`.
 - `workflowId`, `stage`, `artifact`, `candidate`, `evidence`: optional workflow-state fields.
+- `seriesKey`, `supersedesEventId`, and `artifact.revision`: optional repeated-artifact/stale-event convention fields.
 
 Payload text is untrusted data. Do not put raw logs, transcripts, secrets, terminal bytes, or user-authored instructions in event payloads. Use the bridge/generator checklist in [`EVENT_CONTRACT.md`](EVENT_CONTRACT.md) when building a producer.
 

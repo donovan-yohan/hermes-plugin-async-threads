@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import shlex
+import time
 from typing import Any
 
 from .adapter import registry_from_config, registry_path_from_config
@@ -18,10 +20,15 @@ commands:
   /ath status
   /ath list
   /ath events [thread_key] [--limit N]
+  /ath trace <event_id> [--json]
   /ath workflows [thread_key] [--limit N]
   /ath inspect <thread_key>
+  /ath emit-command <thread_key> --event event.type [--summary text]
+  /ath lifecycle [thread_key]
+  /ath prune [--dry-run|--force] [--event-log-days N] [--seen-days N]
   /ath pause <thread_key>
   /ath resume <thread_key>
+  /ath retire <thread_key>
   /ath revoke <thread_key>
 """.strip()
 
@@ -81,17 +88,25 @@ def _run_command(raw_args: str, *, event: Any, gateway: Any) -> str:
     if command == "events":
         thread_key, limit = _parse_events_args(argv[1:])
         return _cmd_events(registry, thread_key=thread_key, limit=limit, owner_user_id=owner_user_id)
+    if command == "trace" and len(argv) >= 2:
+        return _cmd_trace(registry, argv[1], as_json="--json" in argv[2:], owner_user_id=owner_user_id)
     if command in {"workflows", "runs"}:
         thread_key, limit = _parse_events_args(argv[1:])
         return _cmd_workflows(registry, thread_key=thread_key, limit=limit, owner_user_id=owner_user_id)
     if command == "inspect" and len(argv) >= 2:
         return _cmd_inspect(registry, argv[1], owner_user_id=owner_user_id)
+    if command == "emit-command" and len(argv) >= 2:
+        return _cmd_emit_command(registry, argv[1], argv[2:], gateway=gateway, owner_user_id=owner_user_id)
+    if command == "lifecycle":
+        return _cmd_lifecycle(registry, argv[1] if len(argv) >= 2 else "", owner_user_id=owner_user_id)
+    if command == "prune":
+        return _cmd_prune(registry, argv[1:], config=config, owner_user_id=owner_user_id)
     if command in {"pause", "disable"} and len(argv) >= 2:
         return _cmd_set_enabled(registry, argv[1], False, "paused", owner_user_id=owner_user_id)
     if command in {"resume", "enable"} and len(argv) >= 2:
         return _cmd_set_enabled(registry, argv[1], True, "resumed", owner_user_id=owner_user_id)
-    if command in {"revoke", "remove", "rm"} and len(argv) >= 2:
-        return _cmd_set_enabled(registry, argv[1], False, "revoked", owner_user_id=owner_user_id)
+    if command in {"retire", "revoke", "remove", "rm"} and len(argv) >= 2:
+        return _cmd_set_enabled(registry, argv[1], False, "retired" if command == "retire" else "revoked", owner_user_id=owner_user_id)
     return USAGE
 
 
@@ -238,6 +253,63 @@ def _cmd_events(registry: Any, *, thread_key: str | None, limit: int, owner_user
     return "\n".join(lines)
 
 
+def _cmd_trace(registry: Any, event_id: str, *, as_json: bool, owner_user_id: str) -> str:
+    if not owner_user_id:
+        return "async-thread event not found."
+    event = registry.get_event_by_id(event_id=event_id, owner_user_id=owner_user_id)
+    if event is None:
+        return "async-thread event not found."
+    trace = {
+        "eventId": event.event_id,
+        "threadKey": event.thread_key,
+        "producerId": event.producer_id,
+        "eventType": event.event_type,
+        "outcome": event.outcome,
+        "createdAt": event.created_at,
+        "summary": _redact_diagnostic_text(event.summary),
+        "detail": event.detail,
+        "interpretation": _trace_interpretation(event.outcome, event.detail),
+    }
+    if as_json:
+        return json.dumps(trace, sort_keys=True, indent=2)
+    lines = [
+        "async-thread event trace:",
+        f"eventId: `{_short_event_id(event.event_id)}`",
+        f"threadKey: `{_display_metadata(event.thread_key, 80)}`",
+        f"producer/event: `{_display_metadata(event.producer_id, 80)}` / `{_display_metadata(event.event_type, 80)}`",
+        f"outcome: `{_display_outcome(event.outcome)}`",
+        f"created: {event.created_at}",
+        f"interpretation: {_trace_interpretation(event.outcome, event.detail)}",
+    ]
+    summary = _clip(_redact_diagnostic_text(event.summary), 160)
+    if summary:
+        lines.append(f"summary: {summary}")
+    detail = _format_event_detail(event.detail)
+    if detail:
+        lines.append(f"detail: {detail}")
+    return "\n".join(lines)
+
+
+def _trace_interpretation(outcome: str, detail: dict[str, Any]) -> str:
+    if outcome == "duplicate":
+        return "duplicate retry after final handling"
+    if outcome == "coalesced_pending":
+        return "accepted into debounce/coalescing bucket"
+    if outcome == "queued_active_session":
+        return "queued behind an active target session"
+    if outcome == "agent_started":
+        return "queued into idle target session for agent continuation"
+    if outcome == "direct_delivered":
+        return "delivered directly to the mapped gateway thread"
+    if outcome == "dispatch_failed":
+        return "delivery failed after authentication; producer should retry the same event id"
+    if str(outcome).startswith("rejected_"):
+        return "authenticated request rejected by listener scope or disabled handle"
+    if detail.get("queued") is True:
+        return "queued behind an active target session"
+    return "recorded diagnostic event"
+
+
 def _cmd_workflows(registry: Any, *, thread_key: str | None, limit: int, owner_user_id: str) -> str:
     if not owner_user_id:
         return "no async-thread workflows for this user."
@@ -249,6 +321,149 @@ def _cmd_workflows(registry: Any, *, thread_key: str | None, limit: int, owner_u
     for workflow in workflows:
         lines.append(_format_workflow_row(workflow))
     return "\n".join(lines)
+
+
+def _cmd_emit_command(registry: Any, thread_key: str, args: list[str], *, gateway: Any, owner_user_id: str) -> str:
+    handle = registry.get_handle(thread_key)
+    if handle is None or not owner_user_id or handle.owner_user_id != owner_user_id:
+        return "async-thread listener not found."
+    event_type = ""
+    summary = "event ready"
+    i = 0
+    while i < len(args):
+        if args[i] == "--event" and i + 1 < len(args):
+            event_type = args[i + 1]
+            i += 2
+            continue
+        if args[i] == "--summary" and i + 1 < len(args):
+            summary = args[i + 1]
+            i += 2
+            continue
+        i += 1
+    if not event_type:
+        return "usage: /ath emit-command <thread_key> --event event.type [--summary text]"
+    url = _event_url(gateway)
+    producer = _display_metadata(handle.producer_id, 100)
+    event = _display_metadata(event_type, 100)
+    safe_summary = _display_text(summary, 160)
+    return (
+        "sandbox-safe ATH emit template\n"
+        "- set ATH_SECRET outside prompts/logs; this template does not print it.\n"
+        "```bash\n"
+        f"export ATH_URL={shlex.quote(url)}\n"
+        f"export ATH_THREAD_KEY={shlex.quote(handle.thread_key)}\n"
+        f"export ATH_PRODUCER_ID={shlex.quote(producer)}\n"
+        "export ATH_SECRET_FILE=/path/to/ath-secret-file\n"
+        "ATH_SECRET=$(cat \"$ATH_SECRET_FILE\") python3 - <<'PY'\n"
+        "import hashlib, hmac, json, os, time, urllib.error, urllib.request\n"
+        "body = {\n"
+        "    'version': 'async-thread-event/v1',\n"
+        "    'eventId': f\"manual-{int(time.time())}\",\n"
+        f"    'eventType': {event!r},\n"
+        "    'producer': {'id': os.environ['ATH_PRODUCER_ID']},\n"
+        "    'occurredAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),\n"
+        "    'asyncThread': {'threadKey': os.environ['ATH_THREAD_KEY']},\n"
+        f"    'summary': {safe_summary!r},\n"
+        "    'tailMode': 'compact',\n"
+        "    'payload': {'status': 'ready'},\n"
+        "}\n"
+        "raw = json.dumps(body, sort_keys=True, separators=(',', ':')).encode()\n"
+        "sig = hmac.new(os.environ['ATH_SECRET'].encode(), raw, hashlib.sha256).hexdigest()\n"
+        "req = urllib.request.Request(os.environ['ATH_URL'], data=raw, method='POST', headers={'Content-Type':'application/json','X-Hermes-Signature-256':'sha256='+sig})\n"
+        "try:\n"
+        "    with urllib.request.urlopen(req, timeout=20) as res:\n"
+        "        print(res.status); print(res.read().decode())\n"
+        "except urllib.error.HTTPError as err:\n"
+        "    print(f'HTTP Error {err.code}: {err.read().decode()}')\n"
+        "except urllib.error.URLError as err:\n"
+        "    print(f'URL Error: {err.reason}')\n"
+        "except Exception as err:\n"
+        "    print(f'Error: {err}')\n"
+        "PY\n"
+        "```"
+    )
+
+
+def _cmd_lifecycle(registry: Any, thread_key: str, *, owner_user_id: str) -> str:
+    handle = registry.get_handle(thread_key) if thread_key else None
+    if thread_key and (handle is None or not owner_user_id or handle.owner_user_id != owner_user_id):
+        return "async-thread listener not found."
+    scope = f" for `{_display_metadata(thread_key, 80)}`" if thread_key else ""
+    return (
+        f"async-thread scoped lifecycle{scope}\n"
+        "recommended event stages: `started`, `progress`, `blocked`, `ready_for_review`, `review_passed`, `qa_passed`, `released`, `cancelled`\n"
+        "recommended producer fields: `workflowId`, `stage`, `artifact`, `candidate`, `evidence`, plus `seriesKey`/`subject.artifact.revision` for repeated artifact events.\n"
+        "retire temporary lanes with `/ath retire <thread_key>` after merge/abandonment; retired listeners reject future events with the generic auth error.\n"
+        "use `/ath workflows <thread_key>` for current state and `/ath trace <event-id>` for per-event delivery diagnostics."
+    )
+
+
+def _cmd_prune(registry: Any, args: list[str], *, config: Any, owner_user_id: str) -> str:
+    if not owner_user_id:
+        return "no async-thread registry rows for this user."
+    extra = getattr(config, "extra", {}) or {}
+    event_days = _configured_nonnegative_days(extra.get("event_log_retention_days", extra.get("retention_event_log_days", 30)), 30)
+    seen_days = _configured_nonnegative_days(extra.get("seen_event_retention_days", extra.get("retention_seen_days", 7)), 7)
+    dry_run = True
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--force":
+            dry_run = False
+            i += 1
+            continue
+        if arg == "--dry-run":
+            dry_run = True
+            i += 1
+            continue
+        if arg == "--event-log-days" and i + 1 < len(args):
+            parsed = _parse_nonnegative_days(args[i + 1])
+            if parsed is None:
+                return "invalid event-log retention days. use a non-negative integer."
+            event_days = parsed
+            i += 2
+            continue
+        if arg == "--seen-days" and i + 1 < len(args):
+            parsed = _parse_nonnegative_days(args[i + 1])
+            if parsed is None:
+                return "invalid seen-event retention days. use a non-negative integer."
+            seen_days = parsed
+            i += 2
+            continue
+        return "usage: /ath prune [--dry-run|--force] [--event-log-days N] [--seen-days N]"
+    event_cutoff = _utc_days_ago(event_days)
+    seen_cutoff = _utc_days_ago(seen_days)
+    result = registry.prune_old_rows(
+        owner_user_id=owner_user_id,
+        event_log_before=event_cutoff,
+        seen_before=seen_cutoff,
+        dry_run=dry_run,
+    )
+    action = "would prune" if dry_run else "pruned"
+    suffix = "use `--force` to delete rows." if dry_run else "replay protection inside the configured retention window was preserved."
+    return (
+        f"async-thread prune {'dry-run' if dry_run else 'complete'}\n"
+        f"{action} event_log rows: {result['event_log']} before {event_cutoff}\n"
+        f"{action} seen_events rows: {result['seen_events']} before {seen_cutoff}\n"
+        f"{suffix}"
+    )
+
+
+def _configured_nonnegative_days(value: Any, default: int) -> int:
+    parsed = _parse_nonnegative_days(value)
+    return parsed if parsed is not None else default
+
+
+def _parse_nonnegative_days(value: Any) -> int | None:
+    try:
+        days = int(value)
+    except (TypeError, ValueError):
+        return None
+    return days if days >= 0 else None
+
+
+def _utc_days_ago(days: int) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(max(0.0, time.time() - max(0, days) * 86400)))
 
 
 def _split_csv(value: str) -> list[str]:

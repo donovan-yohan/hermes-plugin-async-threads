@@ -51,7 +51,7 @@ The diagram above is intentionally scoped to the current MVP: gateway-local disp
 
 ## Quickstart
 
-See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for install/config and a complete signed demo event. See [`docs/EVENT_CONTRACT.md`](docs/EVENT_CONTRACT.md) for the producer-facing event contract and JSON Schema.
+See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for install/config and a complete signed demo event. See [`docs/EVENT_CONTRACT.md`](docs/EVENT_CONTRACT.md) for the producer-facing event contract and JSON Schema. See [`docs/BRIDGE_RECIPES.md`](docs/BRIDGE_RECIPES.md) for task-board bridge, emit-command, lifecycle, supersession, trace, and prune recipes.
 
 Minimal listener example from a supported Hermes gateway conversation:
 
@@ -96,7 +96,7 @@ See [`docs/SECURITY.md`](docs/SECURITY.md) for more detail.
 ## Current implementation features
 
 - plugin-local SQLite async-thread registry;
-- `/ath listen/list/inspect/status/events/workflows/pause/resume/revoke` gateway commands;
+- `/ath listen/list/inspect/status/events/trace/workflows/emit-command/lifecycle/prune/pause/resume/retire/revoke` gateway commands;
 - `async_threads` gateway platform receiver;
 - signed `async-thread-event/v1` HTTP endpoint;
 - de-dupe by producer/event id;

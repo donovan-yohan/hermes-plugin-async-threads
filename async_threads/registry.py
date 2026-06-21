@@ -379,6 +379,103 @@ class AsyncThreadRegistry:
             rows = conn.execute(sql, params).fetchall()
         return [_row_to_event(row) for row in rows]
 
+    def get_event_by_id(
+        self,
+        *,
+        event_id: str,
+        owner_user_id: str | None = None,
+    ) -> AsyncThreadEventLog | None:
+        safe_id = safe_event_id(event_id)
+        if not safe_id:
+            return None
+        sql, params = _event_query(
+            """
+            select e.id, e.producer_id, e.event_id, e.thread_key, e.event_type,
+                   e.outcome, e.summary, e.detail_json, e.created_at
+            """,
+            owner_user_id=owner_user_id,
+        )
+        sql += " and e.event_id = ?" if " where " in sql else " where e.event_id = ?"
+        params.append(safe_id)
+        sql += " order by e.id desc limit 1"
+        with self._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return _row_to_event(row) if row else None
+
+    def prune_old_rows(
+        self,
+        *,
+        owner_user_id: str,
+        event_log_before: str,
+        seen_before: str,
+        dry_run: bool = True,
+    ) -> dict[str, int | bool | str]:
+        """Prune old diagnostic/de-dupe rows for one owner.
+
+        Cutoffs are UTC ISO strings from utc_now-style formatting. Lexicographic
+        comparison is intentional for this fixed-width timestamp format.
+        """
+        if not owner_user_id:
+            return {"dry_run": dry_run, "event_log": 0, "seen_events": 0, "owner_scoped": False}
+        with self._connect() as conn:
+            if not dry_run:
+                conn.execute("BEGIN IMMEDIATE")
+            event_count = int(
+                conn.execute(
+                    """
+                    select count(*)
+                    from event_log e
+                    join async_thread_handles h on h.thread_key = e.thread_key
+                    where h.owner_user_id = ? and e.created_at < ?
+                    """,
+                    (owner_user_id, event_log_before),
+                ).fetchone()[0]
+            )
+            seen_count = int(
+                conn.execute(
+                    """
+                    select count(*)
+                    from seen_events s
+                    join async_thread_handles h on h.thread_key = s.thread_key
+                    where h.owner_user_id = ? and s.first_seen_at < ?
+                    """,
+                    (owner_user_id, seen_before),
+                ).fetchone()[0]
+            )
+            if not dry_run:
+                conn.execute(
+                    """
+                    delete from event_log
+                    where id in (
+                        select e.id
+                        from event_log e
+                        join async_thread_handles h on h.thread_key = e.thread_key
+                        where h.owner_user_id = ? and e.created_at < ?
+                    )
+                    """,
+                    (owner_user_id, event_log_before),
+                )
+                conn.execute(
+                    """
+                    delete from seen_events
+                    where (producer_id, event_id) in (
+                        select s.producer_id, s.event_id
+                        from seen_events s
+                        join async_thread_handles h on h.thread_key = s.thread_key
+                        where h.owner_user_id = ? and s.first_seen_at < ?
+                    )
+                    """,
+                    (owner_user_id, seen_before),
+                )
+        return {
+            "dry_run": dry_run,
+            "event_log": event_count,
+            "seen_events": seen_count,
+            "event_log_before": event_log_before,
+            "seen_before": seen_before,
+            "owner_scoped": True,
+        }
+
     def set_enabled(self, thread_key: str, enabled: bool) -> bool:
         with self._connect() as conn:
             cur = conn.execute(
