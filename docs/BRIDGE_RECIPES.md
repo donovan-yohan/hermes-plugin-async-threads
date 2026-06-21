@@ -24,7 +24,7 @@ Recommended defaults:
 - do not wake for every comment, heartbeat, or progress tick;
 - use a stable idempotency key such as `<board>:<task_id>:<task_event_id>`;
 - include `workflowId` as `<board>:<task_id>`;
-- include `seriesKey` as `kanban-task:<board>:<task_id>`;
+- include `seriesKey` as `task-board:<board>:<task_id>`;
 - put lane, issue/PR URL, and task id in `subject`;
 - put compact status facts in `payload`;
 - use `tailMode: "compact"` unless explicitly debugging.
@@ -35,13 +35,13 @@ Example event:
 {
   "version": "async-thread-event/v1",
   "eventId": "board-a:TASK-42:event-1009",
-  "eventType": "kanban.task.blocked",
-  "producer": {"id": "example-kanban"},
+  "eventType": "task_board.task.blocked",
+  "producer": {"id": "example-task-board"},
   "occurredAt": "2026-06-20T19:00:00Z",
   "asyncThread": {"threadKey": "ath_..."},
   "summary": "TASK-42 is blocked waiting for review evidence",
   "tailMode": "compact",
-  "seriesKey": "kanban-task:board-a:TASK-42",
+  "seriesKey": "task-board:board-a:TASK-42",
   "workflowId": "board-a:TASK-42",
   "stage": "blocked",
   "subject": {
