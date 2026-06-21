@@ -51,5 +51,6 @@ Authenticated accepted events, duplicates, dispatch failures, and authenticated 
 The public-release readiness epic tracks remaining hardening before broad shareout:
 
 - add live non-Discord gateway smoke evidence before claiming end-to-end support beyond metadata routing coverage.
+- replace private gateway/adapter coupling with the stable continuation API proposed in [`docs/design/STABLE_CONTINUATION_API.md`](design/STABLE_CONTINUATION_API.md).
 
 See https://github.com/donovan-yohan/hermes-plugin-async-threads/issues/33
