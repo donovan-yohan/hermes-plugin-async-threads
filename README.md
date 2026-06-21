@@ -12,7 +12,7 @@ This repository is an MVP. It is useful, but it is not a blanket promise that ev
 
 | Surface | Status |
 | --- | --- |
-| Discord gateway sessions | Tested MVP path |
+| Discord gateway sessions | Unit-tested dispatch path with mock adapter; live gateway smoke pending |
 | Telegram gateway sessions | Metadata helper covered for DM/topic routing; live gateway smoke pending |
 | Slack gateway sessions | Generic thread metadata covered; live gateway smoke pending |
 | Other gateway adapters | Intended, unverified |
@@ -40,7 +40,7 @@ Good fits:
 
 ![Baoyu infographic showing producer event validation, registry lookup, policy routing, and same gateway conversation delivery](docs/assets/baoyu-async-thread-flow.png)
 
-The diagram above is intentionally scoped to the current MVP: gateway-local dispatch, Discord-shaped path tested first, and producer payload boxed as untrusted data.
+The diagram above is intentionally scoped to the current MVP: gateway-local dispatch, dispatch paths covered with mock adapter tests, and producer payload boxed as untrusted data.
 
 1. A user creates a listener from an existing Hermes gateway conversation with `/ath listen`.
 2. The plugin stores a durable `threadKey`, the captured Hermes `SessionSource`, allowed producer/event scope, policy, and a per-handle HMAC secret.

@@ -40,6 +40,8 @@ Do not send:
 
 Prefer compact state fields and external log paths. Use `tailMode: compact` or `tailMode: none` for routine events. Use `tailMode: debug` only when explicitly debugging; debug output is still capped and redacted.
 
+Redaction is defense-in-depth, not permission to send secrets. The plugin redacts common secret-bearing keys plus common bare token shapes such as AWS access keys, GitHub tokens, OpenAI keys, Slack tokens, JWT-like values, HMAC signatures, session keys, and PEM private-key blocks before producer text reaches prompts, logs, or command output. Producers must still keep secrets out of event payloads.
+
 ## Local persistence
 
 The MVP stores per-handle HMAC secrets in plugin-local SQLite because the receiver needs to validate inbound events. Operator-facing command output hides stored secrets after creation.
@@ -52,5 +54,6 @@ The public-release readiness epic tracks remaining hardening before broad shareo
 
 - add live non-Discord gateway smoke evidence before claiming end-to-end support beyond metadata routing coverage.
 - replace private gateway/adapter coupling with the stable continuation API proposed in [`docs/design/STABLE_CONTINUATION_API.md`](design/STABLE_CONTINUATION_API.md).
+- add retention/pruning for old de-dupe and event-log rows ([#48](https://github.com/donovan-yohan/hermes-plugin-async-threads/issues/48)).
 
 See https://github.com/donovan-yohan/hermes-plugin-async-threads/issues/33

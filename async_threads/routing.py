@@ -15,6 +15,13 @@ _core_thread_metadata_for_source = cast(
 )
 
 
+def _thread_id_fallback(source: Any) -> dict[str, Any] | None:
+    thread_id = getattr(source, "thread_id", None)
+    if thread_id is None:
+        return None
+    return {"thread_id": thread_id}
+
+
 def send_metadata_for_source(source: Any, *, reply_to_message_id: str | None = None) -> dict[str, Any] | None:
     """Return platform-aware metadata for sends targeting a captured source.
 
@@ -24,8 +31,11 @@ def send_metadata_for_source(source: Any, *, reply_to_message_id: str | None = N
     continuation/routing API once Hermes core provides one.
     """
     if callable(_core_thread_metadata_for_source):
-        return _core_thread_metadata_for_source(source, reply_to_message_id=reply_to_message_id)
-    thread_id = getattr(source, "thread_id", None)
-    if thread_id is None:
-        return None
-    return {"thread_id": thread_id}
+        try:
+            return _core_thread_metadata_for_source(source, reply_to_message_id=reply_to_message_id)
+        except TypeError:
+            # Older Hermes checkouts may expose the helper without the newer
+            # reply anchor kwarg. Preserve generic thread routing rather than
+            # failing notice/direct-delivery sends at runtime.
+            return _thread_id_fallback(source)
+    return _thread_id_fallback(source)

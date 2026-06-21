@@ -61,3 +61,14 @@ def test_send_metadata_for_source_telegram_dm_topic_can_use_explicit_reply_ancho
     metadata = send_metadata_for_source(_telegram_dm_topic_source(), reply_to_message_id="100")
 
     assert metadata == _telegram_dm_topic_metadata("100")
+
+
+def test_send_metadata_for_source_falls_back_when_core_helper_signature_is_old(monkeypatch):
+    def old_helper(source):
+        return {"thread_id": source.thread_id, "legacy": True}
+
+    import async_threads.routing as routing
+
+    monkeypatch.setattr(routing, "_core_thread_metadata_for_source", old_helper)
+
+    assert send_metadata_for_source(_telegram_dm_topic_source(), reply_to_message_id="100") == {"thread_id": "42"}
