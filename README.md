@@ -112,8 +112,8 @@ See [`docs/SECURITY.md`](docs/SECURITY.md) for more detail.
 
 - Gateway-local MVP: dispatch assumes the target platform adapter is connected in the same gateway process/profile.
 - Non-Discord routing has unit coverage for shared send metadata, Telegram DM/topic metadata, and Slack-style generic thread metadata; live gateway smokes are still pending.
-- Direct delivery, acknowledgement, and command notices share a centralized send-metadata helper, but the helper still wraps a private Hermes gateway function until the stable continuation API spike lands.
-- Active-session queueing currently relies on Hermes gateway/adapter internals.
+- Direct delivery, acknowledgement, and command notices share a centralized send-metadata helper, but the helper still wraps a private Hermes gateway function until the [stable continuation API](docs/design/STABLE_CONTINUATION_API.md) lands.
+- Active-session queueing currently relies on Hermes gateway/adapter internals; the continuation API spike names the smallest core seam to remove that coupling.
 - CLI and Hermes Desktop cannot create a listener from “here” yet.
 
 ## Development
