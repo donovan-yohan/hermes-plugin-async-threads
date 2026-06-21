@@ -164,7 +164,7 @@ async_thread_handles(
   producer_id text not null,
   allowed_event_types text not null,     -- JSON array
   policy_json text not null,             -- direct/agent, active mode, max turns, toolsets
-  route_scope_json text not null          -- repo/workContext/issue/etc allowlist
+  route_scope_json text not null          -- repo/work_context/issue/etc allowlist
 );
 
 producer_secrets(

@@ -46,7 +46,7 @@ producer.session.pr_opened
 or:
 
 ```txt
-producer.workcontext.chunk_ready
+producer.work_context.chunk_ready
 ```
 
 and have Hermes wake the same Discord thread directly.
@@ -86,7 +86,7 @@ Not every event should blindly launch an expensive agent run. A route should be 
 
 A workflow workbench is one motivating producer, but the Hermes plugin should stay producer-agnostic. It should work for:
 
-- external session/workcontext/node events;
+- external session/work-context/node events;
 - GitHub PR/check events;
 - CI deploy events;
 - long-running local jobs;
@@ -232,8 +232,8 @@ A producer needs a durable event/outbox/subscription layer for events like:
 - `producer.session.blocked`
 - `producer.session.pr_opened`
 - `producer.branch.pushed`
-- `producer.workcontext.artifact_published`
-- `producer.workcontext.chunk_ready`
+- `producer.work_context.artifact_published`
+- `producer.work_context.chunk_ready`
 - `producer.node.paired`
 - `producer.node.offline`
 
