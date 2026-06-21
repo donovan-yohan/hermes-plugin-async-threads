@@ -73,11 +73,38 @@ Use these when a producer wants Hermes to track a long-running workflow or gate 
 | --- | --- | --- |
 | `workflowId` | string | Stable workflow/run id. May also be provided as `workflow.id`, `workflow.workflow_id`, `subject.workflow_id`, or `subject.workflowId`. |
 | `stage` | string | Current workflow stage. Common stages: `started`, `progress`, `ready_for_review`, `review_requested`, `review_passed`, `review_failed`, `candidate_ready`, `qa_requested`, `qa_passed`, `qa_failed`, `blocked`, `needs_attention`, `released`, `cancelled`. |
-| `artifact` | object | The thing being moved through gates, for example `{ "kind": "pull_request", "id": "37", "url": "..." }`. |
+| `artifact` | object | The thing being moved through gates, for example `{ "kind": "pull_request", "id": "37", "url": "...", "revision": "abc123" }`. |
 | `candidate` | object | Readiness candidate state, for example `{ "id": "pr-37", "kind": "pull_request", "readiness": "forming" }`. |
 | `evidence` | object | Gate evidence. Include `kind` and `status`; status is normalized to `passed`, `failed`, `stale`, or `unknown`. |
+| `seriesKey` | string | Optional stable series key for repeated events about the same logical artifact, for example `github-pr:owner/repo:37`. |
+| `supersedesEventId` | string | Optional previous event id in the same series that this event supersedes. |
 
 Workflow fields are sanitized before persistence. They are still producer-controlled data, not agent instructions.
+
+## Repeated artifact and supersession convention
+
+Use a stable `seriesKey` when multiple event ids describe revisions of the same logical artifact. Put the current revision on the artifact itself, usually as `artifact.revision` or `subject.artifact.revision`.
+
+```json
+{
+  "version": "async-thread-event/v1",
+  "eventId": "pr-37-head-b-review-passed",
+  "eventType": "code.review.passed",
+  "producer": {"id": "example-ci"},
+  "occurredAt": "2026-06-20T19:00:00Z",
+  "asyncThread": {"threadKey": "ath_..."},
+  "summary": "review passed for PR 37 at head b",
+  "seriesKey": "github-pr:example/repo:37",
+  "supersedesEventId": "pr-37-head-a-review-requested",
+  "workflowId": "pr-37",
+  "stage": "review_passed",
+  "artifact": {"kind": "pull_request", "id": "37", "url": "https://example.invalid/repo/pull/37", "revision": "bbbbbbbb"},
+  "candidate": {"id": "pr-37", "readiness": "ready"},
+  "evidence": {"kind": "review", "status": "passed"}
+}
+```
+
+Consumers should still verify the live artifact revision before taking irreversible action. The series fields are a producer/consumer convention for stale-event handling; they do not make stale payload text trustworthy.
 
 ## Tail modes and large output fields
 
@@ -141,6 +168,7 @@ A producer bridge should do all of this:
 - Store `threadKey`, receiver URL, producer id, allowed event types, and HMAC secret outside the event payload.
 - Build the JSON body once, encode it as UTF-8 bytes, and sign those exact bytes.
 - Generate stable `eventId` values from the upstream event id, job id, commit sha, run id, or attempt id.
+- For repeated events about one artifact, include `seriesKey` plus `artifact.revision` or `subject.artifact.revision`; use `supersedesEventId` when the producer knows the previous event id.
 - Keep `summary` under one or two sentences.
 - Put compact routing metadata in `subject`.
 - Put compact state facts in `payload`.

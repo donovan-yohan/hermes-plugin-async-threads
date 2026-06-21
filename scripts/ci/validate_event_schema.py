@@ -22,7 +22,7 @@ if str(ROOT) not in sys.path:
 from async_threads.security import extract_envelope_fields
 
 SCHEMA_PATH = ROOT / "docs" / "schemas" / "async-thread-event-v1.schema.json"
-DOCS = [ROOT / "docs" / "EVENT_CONTRACT.md", ROOT / "docs" / "QUICKSTART.md"]
+DOCS = [ROOT / "docs" / "EVENT_CONTRACT.md", ROOT / "docs" / "QUICKSTART.md", ROOT / "docs" / "BRIDGE_RECIPES.md"]
 
 FENCE_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 

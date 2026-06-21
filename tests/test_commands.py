@@ -3,13 +3,18 @@ from types import SimpleNamespace
 import pytest
 
 from async_threads.commands import (
+    _cmd_emit_command,
     _cmd_events,
     _cmd_inspect,
+    _cmd_lifecycle,
     _cmd_list,
+    _cmd_prune,
     _cmd_set_enabled,
+    _cmd_trace,
     _cmd_workflows,
     _run_command,
     _send_notice,
+    _utc_days_ago,
     handle_pre_gateway_dispatch,
 )
 from async_threads.registry import AsyncThreadRegistry
@@ -405,3 +410,115 @@ def test_status_events_and_inspect_show_owner_scoped_diagnostics(tmp_path):
     assert "recent events:" in inspected
     assert "relay.session.pr_opened" in inspected
     assert "secret: hidden" in inspected
+
+
+def test_trace_command_reports_sanitized_delivery_diagnostics(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    handle = registry.create_handle(
+        source={"platform": "discord", "chat_id": "c", "chat_type": "channel", "thread_id": "t"},
+        producer_id="example-ci",
+        owner_user_id="u1",
+    )
+    token = "github_pat_" + ("A" * 22) + "_" + ("B" * 59)
+    registry.log_event(
+        producer_id="example-ci",
+        event_id="evt-trace",
+        thread_key=handle.thread_key,
+        event_type="ci.build.finished",
+        outcome="queued_active_session",
+        summary="queued " + token,
+        detail={"queued": True, "policy": "agent_queue", "exception_message": token},
+    )
+
+    text = _cmd_trace(registry, "evt-trace", as_json=False, owner_user_id="u1")
+    as_json = _cmd_trace(registry, "evt-trace", as_json=True, owner_user_id="u1")
+
+    assert "async-thread event trace" in text
+    assert "queued behind an active target session" in text
+    assert token not in text
+    assert token not in as_json
+    assert "<redacted>" in text or "<redacted>" in as_json
+    assert _cmd_trace(registry, "evt-trace", as_json=False, owner_user_id="other") == "async-thread event not found."
+
+
+def test_emit_command_template_is_owner_scoped_and_does_not_print_secret(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    handle = registry.create_handle(
+        source={"platform": "discord", "chat_id": "c", "chat_type": "channel", "thread_id": "t"},
+        producer_id="demo",
+        owner_user_id="u1",
+    )
+    gateway = SimpleNamespace(adapters={}, config=SimpleNamespace(), session_store=None)
+
+    output = _cmd_emit_command(
+        registry,
+        handle.thread_key,
+        ["--event", "demo.job.finished", "--summary", "job ready"],
+        gateway=gateway,
+        owner_user_id="u1",
+    )
+
+    assert "sandbox-safe ATH emit template" in output
+    assert "demo.job.finished" in output
+    assert handle.thread_key in output
+    assert handle.secret not in output
+    assert "ATH_SECRET_FILE" in output
+    assert "urllib.error.HTTPError" in output
+    assert "urllib.error.URLError" in output
+    assert _cmd_emit_command(registry, handle.thread_key, ["--event", "demo.job.finished"], gateway=gateway, owner_user_id="other") == "async-thread listener not found."
+
+
+def test_lifecycle_command_documents_retirement_and_trace(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    handle = registry.create_handle(
+        source={"platform": "discord", "chat_id": "c", "chat_type": "channel", "thread_id": "t"},
+        producer_id="demo",
+        owner_user_id="u1",
+    )
+
+    output = _cmd_lifecycle(registry, handle.thread_key, owner_user_id="u1")
+
+    assert "started" in output
+    assert "seriesKey" in output
+    assert "/ath retire" in output
+    assert "/ath trace" in output
+    assert _cmd_lifecycle(registry, handle.thread_key, owner_user_id="other") == "async-thread listener not found."
+
+
+def test_prune_command_dry_run_and_force_are_owner_scoped(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    mine = registry.create_handle(
+        source={"platform": "discord", "chat_id": "c", "chat_type": "channel", "thread_id": "t"},
+        producer_id="demo",
+        owner_user_id="u1",
+    )
+    other = registry.create_handle(
+        source={"platform": "discord", "chat_id": "c2", "chat_type": "channel", "thread_id": "t2"},
+        producer_id="demo",
+        owner_user_id="u2",
+    )
+    registry.mark_seen(producer_id="demo", event_id="old-mine", thread_key=mine.thread_key)
+    registry.mark_seen(producer_id="demo", event_id="old-other", thread_key=other.thread_key)
+    registry.log_event(producer_id="demo", event_id="old-mine", thread_key=mine.thread_key, event_type="demo.old", outcome="accepted", summary="old")
+    registry.log_event(producer_id="demo", event_id="old-other", thread_key=other.thread_key, event_type="demo.old", outcome="accepted", summary="old")
+    with registry._connect() as conn:
+        conn.execute("update seen_events set first_seen_at = '2020-01-01T00:00:00Z'")
+        conn.execute("update event_log set created_at = '2020-01-01T00:00:00Z'")
+
+    config = PlatformConfig(enabled=True, extra={"event_log_retention_days": 1, "seen_event_retention_days": 1})
+    dry = _cmd_prune(registry, ["--dry-run"], config=config, owner_user_id="u1")
+    assert "would prune event_log rows: 1" in dry
+    assert "would prune seen_events rows: 1" in dry
+    assert registry.count_recent_events(owner_user_id="u1") == 1
+    assert _cmd_prune(registry, ["--event-log-days", "-1"], config=config, owner_user_id="u1") == "invalid event-log retention days. use a non-negative integer."
+    assert _cmd_prune(registry, ["--seen-days", "nope"], config=config, owner_user_id="u1") == "invalid seen-event retention days. use a non-negative integer."
+    assert _utc_days_ago(999999) == "1970-01-01T00:00:00Z"
+
+    forced = _cmd_prune(registry, ["--force"], config=config, owner_user_id="u1")
+    assert "pruned event_log rows: 1" in forced
+    assert "pruned seen_events rows: 1" in forced
+    assert registry.count_recent_events(owner_user_id="u1") == 0
+    assert registry.count_recent_events(owner_user_id="u2") == 1
+    with registry._connect() as conn:
+        assert conn.execute("select count(*) from seen_events where thread_key = ?", (mine.thread_key,)).fetchone()[0] == 0
+        assert conn.execute("select count(*) from seen_events where thread_key = ?", (other.thread_key,)).fetchone()[0] == 1

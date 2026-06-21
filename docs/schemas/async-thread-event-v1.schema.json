@@ -88,6 +88,18 @@
       "type": "object",
       "additionalProperties": true
     },
+    "seriesKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "Stable series key for repeated events about the same logical artifact."
+    },
+    "supersedesEventId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "Previous event id in the same series superseded by this event."
+    },
     "stage": {
       "type": "string",
       "maxLength": 80
