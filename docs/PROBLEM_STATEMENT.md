@@ -4,12 +4,12 @@
 
 Hermes is already useful as a multi-platform conversational agent: a user can work with Hermes in a Discord thread, Telegram topic, CLI session, or another gateway surface. Hermes also has durable systems like cron, webhooks, background tasks, delegation, and workflow tooling.
 
-Relay is becoming a live workbench/control plane for agent sessions, terminals, nodes, work contexts, GitHub work, handoffs, and cross-device execution. Relay can observe meaningful state changes that should pull the operator back into the same conversation: a Claude Code TUI opened a PR, a session became idle, an agent hit a permission prompt, a node paired, a WorkContext artifact was published, a long-running workflow finished, or a remote node went offline.
+An external workbench/control plane can observe agent sessions, terminals, nodes, work contexts, repository automation, handoffs, and cross-device execution. It can see meaningful state changes that should pull the operator back into the same conversation: an agent session opened a PR, a session became idle, an agent hit a permission prompt, a node paired, a work-context artifact was published, a long-running workflow finished, or a remote node went offline.
 
 The current workaround is a finite quiet cron notifier:
 
 1. create a script-only cron job;
-2. poll Relay/GitHub/session state every N minutes;
+2. poll producer/GitHub/session state every N minutes;
 3. print only when something changed;
 4. deliver the cron output back to the origin thread.
 
@@ -37,16 +37,16 @@ A user starts long-running work from a gateway conversation. The work runs outsi
 
 The workaround is a finite quiet cron job that polls external state and posts only when it sees a transition. That avoids chat spam, but it still adds polling, scheduler state, and lifecycle cleanup burden.
 
-A better system would let Relay emit:
+A better system would let an external producer emit:
 
 ```txt
-relay.session.pr_opened
+producer.session.pr_opened
 ```
 
 or:
 
 ```txt
-relay.workcontext.chunk_ready
+producer.workcontext.chunk_ready
 ```
 
 and have Hermes wake the same Discord thread directly.
@@ -84,9 +84,9 @@ Not every event should blindly launch an expensive agent run. A route should be 
 
 ### 5. Producer-agnostic receiver
 
-Relay is one motivating producer, but the Hermes plugin should not be Relay-only. It should work for:
+A workflow workbench is one motivating producer, but the Hermes plugin should stay producer-agnostic. It should work for:
 
-- Relay session/workcontext/node events;
+- external session/workcontext/node events;
 - GitHub PR/check events;
 - CI deploy events;
 - long-running local jobs;
@@ -99,12 +99,12 @@ The event receiver must authenticate producers, de-dupe events, validate route s
 
 ## Non-goals
 
-- Do not make Relay speak directly to every chat platform. Hermes gateway owns Discord/Telegram/etc. delivery.
-- Do not make Relay a reimplementation of Hermes, Hermes dashboard, or hermes-workspace.
+- Do not make producers speak directly to every chat platform. Hermes gateway owns Discord/Telegram/etc. delivery.
+- Do not make a producer reimplement Hermes, the Hermes dashboard, or a Hermes workspace.
 - Do not turn every webhook payload into an unconditional agent prompt.
 - Do not trust public GitHub issue/comment body text as instructions.
 - Do not require every workflow to use cron.
-- Do not require a full Kanban board just to wake a thread on an event.
+- Do not require a full task board just to wake a thread on an event.
 - Do not preserve unbounded context or raw logs in event payloads.
 - Do not leak secrets, pair tokens, credentials, terminal bytes, environment values, bearer headers, or raw transcript blobs into events or delivery messages.
 
@@ -140,7 +140,7 @@ A producer should not be able to wake arbitrary chats by forging platform ids. T
 
 Event payloads are data, not instructions. Agent prompts should render payloads under a clear untrusted-data boundary, and route templates should be controlled by trusted local config/plugin code.
 
-For GitHub/Relay automation, routes should be able to enforce trusted-actor policy such as: only allow donovan-yohan-authored or donovan-yohan-acted events to trigger automation.
+For GitHub or producer automation, routes should be able to enforce trusted-actor policy, such as only allowing events from approved actors to trigger automation.
 
 ### Capability and cost controls
 
@@ -152,7 +152,7 @@ Routes should declare max turn count, toolsets, model/budget, direct-delivery vs
 {
   "version": "async-thread-event/v1",
   "eventId": "evt_01J...",
-  "eventType": "relay.session.pr_opened",
+  "eventType": "producer.session.pr_opened",
   "producer": {
     "id": "demo-producer",
     "kind": "ci",
@@ -220,24 +220,24 @@ Routes should declare max turn count, toolsets, model/budget, direct-delivery vs
    - inspect recent events;
    - replay a safe event for testing.
 
-## Relay-side complementary work
+## Producer-side complementary work
 
-Relay should not own Discord delivery. Relay should emit events.
+The producer should not own chat-platform delivery. The producer should emit events.
 
-Relay needs a durable event/outbox/subscription layer for events like:
+A producer needs a durable event/outbox/subscription layer for events like:
 
-- `relay.session.idle`
-- `relay.session.needs_attention`
-- `relay.session.permission_prompt`
-- `relay.session.blocked`
-- `relay.session.pr_opened`
-- `relay.branch.pushed`
-- `relay.workcontext.artifact_published`
-- `relay.workcontext.chunk_ready`
-- `relay.node.paired`
-- `relay.node.offline`
+- `producer.session.idle`
+- `producer.session.needs_attention`
+- `producer.session.permission_prompt`
+- `producer.session.blocked`
+- `producer.session.pr_opened`
+- `producer.branch.pushed`
+- `producer.workcontext.artifact_published`
+- `producer.workcontext.chunk_ready`
+- `producer.node.paired`
+- `producer.node.offline`
 
-Each event should include safe routing metadata such as WorkContext id, Relay session id, repo, issue/PR refs, safe summary, redacted diagnostics, and an async-thread handle if Hermes registered one.
+Each event should include safe routing metadata such as work-context id, producer session id, repo, issue/PR refs, safe summary, redacted diagnostics, and an async-thread handle if Hermes registered one.
 
 ## Hermes-side open questions
 
@@ -264,19 +264,19 @@ A useful MVP can be small:
 
 ## Success criteria
 
-- A Relay Claude session can open a PR and trigger Hermes to post back into the original Discord thread without cron polling.
+- An external agent session can open a PR and trigger Hermes to post back into the original gateway thread without cron polling.
 - Duplicate events do not duplicate messages or agent runs.
 - Untrusted payload text is not treated as instruction.
 - A missing/revoked async-thread handle fails closed.
 - The user can see and manage registered async threads.
 - The plugin can direct-deliver or run a bounded continuation based on route policy.
-- The pattern is generic enough for non-Relay producers.
+- The pattern is generic enough for multiple producer types.
 
 ## Anti-patterns to avoid
 
 - Cron jobs that poll forever and need cleanup.
 - Per-workflow ad hoc scripts with hardcoded Discord channel/thread ids.
-- Relay posting directly to Discord instead of emitting events to Hermes.
+- Producers posting directly to chat platforms instead of emitting events to Hermes.
 - Webhook routes that dump raw JSON into an unconstrained agent prompt.
 - Event payloads that contain secrets, raw logs, terminal bytes, credentials, pair tokens, or browser cookies.
 - Treating a public GitHub comment as a trusted instruction source.
@@ -284,6 +284,6 @@ A useful MVP can be small:
 
 ## Why this matters
 
-The working conversation should be the cockpit. If a user starts a long-running agent workflow in a Discord thread, Relay workbench, Telegram topic, or future Hermes/Relay mobile surface, meaningful async events should flow back there naturally. The operator should not have to remember to check cron output, a Relay session list, GitHub, Kanban, and Discord separately.
+The working conversation should be the cockpit. If a user starts a long-running agent workflow in a Discord thread, Telegram topic, CLI session, desktop surface, or future Hermes mobile surface, meaningful async events should flow back there naturally. The operator should not have to remember to check cron output, producer dashboards, GitHub, task boards, and chat threads separately.
 
 This plugin is the missing bridge between event-producing systems and Hermes' conversational gateway: wake the right thread, with the right context, at the right time, without polling.
