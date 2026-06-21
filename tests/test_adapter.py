@@ -124,7 +124,7 @@ def test_render_event_message_redacts_hostile_payload_before_prompt_text():
             "subject": {
                 "repo": "donovan-yohan/hermes-plugin-async-threads",
                 "api_key": "subject-key",
-                "note": "Authorization: Bearer subject-token",
+                "note": "safe note",
             },
             "payload": {
                 "tail": (
@@ -161,6 +161,32 @@ def test_render_event_message_redacts_hostile_payload_before_prompt_text():
         assert sentinel not in text
     assert "<redacted>" in text
     assert "ok" in text
+
+
+def test_render_event_message_redacts_bare_secret_shapes_before_prompt_text():
+    secrets = {
+        "aws": "AKIA" + "IOSFODNN7EXAMPLE",
+        "github": "ghp_" + "abcdefghijklmnopqrstuvwxyz123456",
+        "github_fine_grained": "github_pat_" + ("A" * 22) + "_" + ("B" * 59),
+        "openai": "sk-proj-" + "abcdefghijklmnopqrstuvwxyzABCDE12345",
+        "slack": "xoxb-" + "123456789012-123456789012-abcdefghijklmnopqrstuv",
+        "jwt": "eyJ" + ("a" * 12) + "." + ("b" * 12) + "." + ("c" * 12),
+        "pem": "-----BEGIN RSA " + "PRIVATE KEY-----\nabc123secret\n-----END RSA " + "PRIVATE KEY-----",
+    }
+    text = render_event_message(
+        {
+            "subject": {"token": secrets["github"], "jwt": secrets["jwt"]},
+            "payload": {"body": "\n".join(secrets.values())},
+        },
+        event_type="ci.build.finished",
+        producer_id="example-ci",
+        summary="finished " + secrets["openai"],
+    )
+
+    for secret in secrets.values():
+        assert secret not in text
+    assert "abc123secret" not in text
+    assert text.count("<redacted>") >= len(secrets)
 
 
 def test_render_event_message_redacts_token_query_params_in_urls():
@@ -631,6 +657,31 @@ async def test_coalesces_routine_started_progress_events_into_one_digest(tmp_pat
     )
     assert json.loads(duplicate.text)["status"] == "duplicate"
     assert len(target.handled) == 1
+
+
+@pytest.mark.asyncio
+async def test_coalesced_debounce_timer_flushes_pending_digest(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", debounce_seconds=1)
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+
+    queued = await adapter._handle_event(
+        FakeRequest(
+            _event_body(handle, "evt_timer_flush", "relay.lane.progress", "timer flush", {"lane": "timer"}),
+            handle.secret,
+        )
+    )
+    task = adapter._coalesce_tasks[handle.thread_key]
+    await asyncio.wait_for(task, timeout=2)
+
+    assert queued.status == 202
+    assert len(target.handled) == 1
+    assert "async_threads.coalesced" in target.handled[0].text
+    assert registry.list_recent_events(thread_key=handle.thread_key, limit=1)[0].detail["coalesced_reason"] == "debounce_elapsed"
 
 
 @pytest.mark.asyncio

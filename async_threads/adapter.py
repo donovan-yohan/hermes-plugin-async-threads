@@ -470,7 +470,7 @@ def _build_adapter_base():
         def _pending_coalesced_contains(self, *, thread_key: str, producer_id: str, event_id: str) -> bool:
             for coalesced in (self._coalesced_events, self._coalesced_inflight):
                 for item in coalesced.get(thread_key, []):
-                    fields = item.get("fields", {})
+                    fields = item.get("fields") or {}
                     if fields.get("producer_id") == producer_id and fields.get("event_id") == event_id:
                         return True
             return False

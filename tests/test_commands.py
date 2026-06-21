@@ -3,9 +3,11 @@ from types import SimpleNamespace
 import pytest
 
 from async_threads.commands import (
+    _cmd_events,
     _cmd_inspect,
     _cmd_list,
     _cmd_set_enabled,
+    _cmd_workflows,
     _run_command,
     _send_notice,
     handle_pre_gateway_dispatch,
@@ -96,6 +98,106 @@ def test_help_for_unknown_command():
     gateway = SimpleNamespace(adapters={}, config=SimpleNamespace(), session_store=None)
     event = SimpleNamespace(source=SimpleNamespace(user_id="u"))
     assert "commands:" in _run_command("wat", event=event, gateway=gateway)
+
+
+def test_pre_gateway_hook_fails_closed_without_authorized_source_or_auth_hook(tmp_path):
+    registry_path = tmp_path / "ath.sqlite3"
+    async_adapter = SimpleNamespace(config=PlatformConfig(enabled=True, extra={"registry_path": str(registry_path)}))
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c", chat_type="channel", thread_id="t", user_id="u")
+    event = SimpleNamespace(text="/ath listen relay", source=source)
+
+    for gateway in [
+        SimpleNamespace(adapters={Platform("async_threads"): async_adapter}, config=SimpleNamespace(), session_store=None),
+        SimpleNamespace(
+            adapters={Platform("async_threads"): async_adapter},
+            config=SimpleNamespace(),
+            session_store=None,
+            _is_user_authorized=lambda _source: (_ for _ in ()).throw(RuntimeError("auth backend down")),
+        ),
+    ]:
+        assert handle_pre_gateway_dispatch(event=event, gateway=gateway, session_store=None) == {"action": "allow"}
+
+    no_source_event = SimpleNamespace(text="/ath listen relay", source=None)
+    gateway = SimpleNamespace(
+        adapters={Platform("async_threads"): async_adapter},
+        config=SimpleNamespace(),
+        session_store=None,
+        _is_user_authorized=lambda _source: True,
+    )
+    assert handle_pre_gateway_dispatch(event=no_source_event, gateway=gateway, session_store=None) == {"action": "allow"}
+    assert AsyncThreadRegistry(registry_path).list_handles() == []
+
+
+def test_events_command_redacts_bare_secret_shapes(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    handle = registry.create_handle(
+        source={"platform": "discord", "chat_id": "c", "chat_type": "channel", "thread_id": "t"},
+        producer_id="example-ci",
+        owner_user_id="u1",
+    )
+    secrets = [
+        "AKIA" + "IOSFODNN7EXAMPLE",
+        "ghp_" + "abcdefghijklmnopqrstuvwxyz123456",
+        "github_pat_" + ("A" * 22) + "_" + ("B" * 59),
+        "sk-proj-" + "abcdefghijklmnopqrstuvwxyzABCDE12345",
+        "xoxb-" + "123456789012-123456789012-abcdefghijklmnopqrstuv",
+        "eyJ" + ("a" * 12) + "." + ("b" * 12) + "." + ("c" * 12),
+        "abc123secret",
+    ]
+    registry.log_event(
+        producer_id="example-ci",
+        event_id="evt-" + secrets[1],
+        thread_key=handle.thread_key,
+        event_type="ci.build.finished",
+        outcome="delivered",
+        summary="finished with " + secrets[2],
+        detail={"error": " ".join(secrets[:-1]) + " " + "-----BEGIN RSA " + "PRIVATE KEY-----\nabc123secret\n-----END RSA " + "PRIVATE KEY-----"},
+    )
+
+    output = _cmd_events(registry, thread_key=handle.thread_key, limit=5, owner_user_id="u1")
+
+    for secret in secrets:
+        assert secret not in output
+    assert "<redacted>" in output or "redacted:" in output
+
+
+def test_command_display_redacts_secret_shapes_across_list_inspect_and_workflows(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    classic_token = "ghp_" + "abcdefghijklmnopqrstuvwxyz123456"
+    fine_grained_token = "github_pat_" + ("A" * 22) + "_" + ("B" * 59)
+    handle = registry.create_handle(
+        source={"platform": "discord", "chat_id": "c", "chat_type": "channel", "thread_id": "t"},
+        producer_id=classic_token,
+        owner_user_id="u1",
+        label="listener " + fine_grained_token,
+    )
+    registry.update_workflow_state_from_event(
+        handle=handle,
+        fields={
+            "event_id": "evt-" + fine_grained_token,
+            "event_type": "ci.build.finished",
+            "producer_id": classic_token,
+            "thread_key": handle.thread_key,
+            "summary": "done " + fine_grained_token,
+        },
+        data={
+            "workflowId": "wf-" + fine_grained_token,
+            "stage": classic_token,
+            "candidate": {"id": fine_grained_token, "readiness": "ready"},
+            "evidence": {"kind": classic_token, "status": "passed"},
+        },
+    )
+
+    outputs = [
+        _cmd_list(registry, owner_user_id="u1"),
+        _cmd_inspect(registry, handle.thread_key, owner_user_id="u1"),
+        _cmd_workflows(registry, thread_key=handle.thread_key, limit=5, owner_user_id="u1"),
+    ]
+
+    for output in outputs:
+        assert classic_token not in output
+        assert fine_grained_token not in output
+    assert any("<redacted>" in output or "redacted:" in output for output in outputs)
 
 
 def test_pre_gateway_hook_returns_skip_dict_for_ath_help():

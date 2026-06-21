@@ -42,13 +42,17 @@ def handle_pre_gateway_dispatch(**kwargs):
 
     source = getattr(event, "source", None)
     auth_fn = getattr(gateway, "_is_user_authorized", None)
-    if callable(auth_fn) and source is not None:
-        try:
-            if not auth_fn(source):
-                # Let the normal gateway auth path handle/drop the message.
-                return {"action": "allow"}
-        except Exception:
+    if source is None or not callable(auth_fn):
+        # Fail closed for plugin side effects. Let the normal gateway path handle
+        # or ignore the message instead of executing privileged /ath commands
+        # when the host cannot prove the caller is authorized.
+        return {"action": "allow"}
+    try:
+        if not auth_fn(source):
+            # Let the normal gateway auth path handle/drop the message.
             return {"action": "allow"}
+    except Exception:
+        return {"action": "allow"}
 
     args = text.split(maxsplit=1)[1] if " " in text else ""
     try:
@@ -251,14 +255,22 @@ def _split_csv(value: str) -> list[str]:
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
 
+def _display_text(value: Any, max_len: int) -> str:
+    return _clip(redact_secret_text(str(value or ""), max_input_chars=1000, max_output_chars=1000), max_len)
+
+
+def _display_metadata(value: Any, max_len: int) -> str:
+    return _clip(redact_metadata_text(str(value or ""), max_chars=1000), max_len)
+
+
 def _format_workflow_policy(policy: WorkflowPolicy) -> str:
     if not policy.gate_order:
         return "none"
-    parts = [f"{policy.gate_mode} order={','.join(policy.gate_order)}"]
+    parts = [f"{policy.gate_mode} order={','.join(_display_text(item, 40) for item in policy.gate_order)}"]
     if policy.stale_on_artifact_change:
-        parts.append(f"stale_on_artifact_change={','.join(policy.stale_on_artifact_change)}")
+        parts.append(f"stale_on_artifact_change={','.join(_display_text(item, 40) for item in policy.stale_on_artifact_change)}")
     if policy.candidate_required:
-        parts.append(f"candidate_required={','.join(policy.candidate_required)}")
+        parts.append(f"candidate_required={','.join(_display_text(item, 40) for item in policy.candidate_required)}")
     return "; ".join(parts)
 
 
@@ -271,23 +283,23 @@ def _format_workflow_row(workflow: Any) -> str:
     if isinstance(evidence, dict):
         for gate, item in sorted(evidence.items()):
             if isinstance(item, dict):
-                evidence_bits.append(f"{gate}:{item.get('status', 'unknown')}")
+                evidence_bits.append(f"{_display_text(gate, 40)}:{_display_text(item.get('status', 'unknown'), 24)}")
     candidate = getattr(workflow, "candidate", {}) or {}
     candidate_id = candidate.get("id") if isinstance(candidate, dict) else ""
     candidate_readiness = candidate.get("readiness") if isinstance(candidate, dict) else ""
     candidate_text = ""
     if candidate_id or candidate_readiness:
-        candidate_text = f" candidate={_clip(str(candidate_id or '-'), 40)}:{_clip(str(candidate_readiness or '-'), 24)}"
-    active_text = ",".join(str(item) for item in active) or "-"
-    deferred_text = ",".join(str(item) for item in deferred) or "-"
+        candidate_text = f" candidate={_display_text(candidate_id or '-', 40)}:{_display_text(candidate_readiness or '-', 24)}"
+    active_text = ",".join(_display_text(item, 40) for item in active) or "-"
+    deferred_text = ",".join(_display_text(item, 40) for item in deferred) or "-"
     evidence_text = ",".join(evidence_bits) or "-"
     summary = _clip(_redact_diagnostic_text(getattr(workflow, "last_summary", "")), 80)
     summary_text = f" — {summary}" if summary else ""
     return (
-        f"- {workflow.updated_at} `{workflow.thread_key}` workflow=`{_clip(workflow.workflow_id, 80)}` "
-        f"stage=`{_clip(workflow.stage or '-', 40)}`{candidate_text} "
+        f"- {workflow.updated_at} `{_display_metadata(workflow.thread_key, 80)}` workflow=`{_display_text(workflow.workflow_id, 80)}` "
+        f"stage=`{_display_text(workflow.stage or '-', 40)}`{candidate_text} "
         f"active={active_text} deferred={deferred_text} evidence={evidence_text} "
-        f"last={_clip(workflow.last_event_type or '-', 80)} id={_short_event_id(workflow.last_event_id)}{summary_text}"
+        f"last={_display_text(workflow.last_event_type or '-', 80)} id={_short_event_id(workflow.last_event_id)}{summary_text}"
     )
 
 
@@ -403,11 +415,15 @@ def _cmd_list(registry: Any, *, owner_user_id: str) -> str:
     lines = ["async-thread listeners:"]
     for h in handles[:20]:
         state = "enabled" if h.enabled else "disabled"
-        label = f" — {h.label}" if h.label else ""
-        thread = f" thread={h.thread_id}" if h.thread_id else ""
+        label = f" — {_display_text(h.label, 80)}" if h.label else ""
+        thread = f" thread={_display_metadata(h.thread_id, 80)}" if h.thread_id else ""
         debounce = f" debounce={h.debounce_seconds}s" if h.debounce_seconds else ""
         workflow = f" workflow={_format_workflow_policy(h.workflow_policy)}" if h.workflow_policy.gate_order else ""
-        lines.append(f"- `{h.thread_key}` {state} producer=`{h.producer_id}` policy=`{h.policy}`{debounce}{workflow}{thread}{label}")
+        lines.append(
+            f"- `{_display_metadata(h.thread_key, 80)}` {state} "
+            f"producer=`{_display_metadata(h.producer_id, 80)}` policy=`{_display_text(h.policy, 40)}`"
+            f"{debounce}{workflow}{thread}{label}"
+        )
     return "\n".join(lines)
 
 
@@ -416,7 +432,7 @@ def _cmd_inspect(registry: Any, thread_key: str, *, owner_user_id: str) -> str:
     if h is None or not owner_user_id or h.owner_user_id != owner_user_id:
         return "async-thread listener not found."
     state = "enabled" if h.enabled else "disabled"
-    events = ", ".join(h.allowed_event_types) if h.allowed_event_types else "all"
+    events = ", ".join(_display_text(event_type, 80) for event_type in h.allowed_event_types) if h.allowed_event_types else "all"
     recent_events = registry.list_recent_events(thread_key=thread_key, owner_user_id=owner_user_id, limit=3)
     recent_text = "\n".join(_format_event_row(event) for event in recent_events) if recent_events else "none"
     workflows = registry.list_workflow_states(thread_key=thread_key, owner_user_id=owner_user_id, limit=3)
@@ -424,14 +440,14 @@ def _cmd_inspect(registry: Any, thread_key: str, *, owner_user_id: str) -> str:
     session_key_state = "present" if h.session_key else "-"
     session_key_hash = safe_session_key_hash(h.session_key) or "-"
     return (
-        f"`{h.thread_key}` {state}\n"
-        f"producer: `{h.producer_id}`\n"
-        f"policy: `{h.policy}`\n"
-        f"ack: `{h.ack_mode}`\n"
+        f"`{_display_metadata(h.thread_key, 80)}` {state}\n"
+        f"producer: `{_display_metadata(h.producer_id, 80)}`\n"
+        f"policy: `{_display_text(h.policy, 40)}`\n"
+        f"ack: `{_display_text(h.ack_mode, 40)}`\n"
         f"debounce: `{h.debounce_seconds}s`\n"
         f"workflow gates: {_format_workflow_policy(h.workflow_policy)}\n"
         f"events: {events}\n"
-        f"platform/chat/thread: `{h.platform}` / `{h.chat_id}` / `{h.thread_id or '-'}`\n"
+        f"platform/chat/thread: `{_display_text(h.platform, 40)}` / `{_display_metadata(h.chat_id, 80)}` / `{_display_metadata(h.thread_id or '-', 80)}`\n"
         f"sessionKey: {session_key_state} hash=`{session_key_hash}`\n"
         f"created: {h.created_at}\n"
         "secret: hidden\n"

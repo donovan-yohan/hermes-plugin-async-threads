@@ -19,7 +19,7 @@ def _candidate_hermes_paths() -> list[Path]:
     candidates = []
     env_path = os.environ.get("HERMES_AGENT_PATH")
     if env_path:
-        candidates.append(Path(env_path).expanduser())
+        candidates.append(Path(env_path).expanduser().resolve())
     candidates.extend(
         [
             repo.parent / "hermes-agent",

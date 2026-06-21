@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  quality:
+    name: Public quality gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Lockfile is current
+        run: uv lock --check
+
+      - name: Gateway-free tests
+        run: uv run --extra test pytest -q --confcutdir=tests --rootdir=tests tests/test_security.py tests/test_profile_lane.py tests/test_registry.py
+
+      - name: Build wheel and source distribution
+        run: uv build
+
+      - name: Inspect wheel contents and plugin entry point
+        run: |
+          python - <<'PY'
+          import glob
+          import zipfile
+
+          wheel = glob.glob('dist/*.whl')[0]
+          with zipfile.ZipFile(wheel) as zf:
+              names = set(zf.namelist())
+              required = {
+                  'async_threads/adapter.py',
+                  'async_threads/routing.py',
+                  'async_threads/registry.py',
+                  'hermes_plugin_async_threads/__init__.py',
+              }
+              missing = sorted(required - names)
+              assert not missing, f'wheel missing files: {missing}'
+              entry_files = [name for name in names if name.endswith('.dist-info/entry_points.txt')]
+              assert entry_files, 'wheel missing entry_points.txt'
+              entry_text = zf.read(entry_files[0]).decode()
+              assert 'hermes_agent.plugins' in entry_text, entry_text
+              assert 'async-threads = hermes_plugin_async_threads' in entry_text, entry_text
+              print(f'wheel ok: {wheel}')
+          PY
+
+      - name: Installed wheel advertises plugin entry point
+        run: |
+          python -m venv /tmp/ath-wheel-smoke
+          /tmp/ath-wheel-smoke/bin/pip install -q dist/*.whl
+          /tmp/ath-wheel-smoke/bin/python - <<'PY'
+          from importlib.metadata import entry_points
+
+          matches = [ep for ep in entry_points(group='hermes_agent.plugins') if ep.name == 'async-threads']
+          assert matches and matches[0].value == 'hermes_plugin_async_threads', matches
+          print('entry point metadata ok:', matches[0])
+          PY
+
+      - name: Validate public event schema and JSON examples
+        run: uv run --with jsonschema python scripts/ci/validate_event_schema.py
+
+      - name: Public-docs internal-term smoke
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          docs = [
+              Path('README.md'),
+              Path('docs/QUICKSTART.md'),
+              Path('docs/SECURITY.md'),
+              Path('docs/EVENT_CONTRACT.md'),
+              Path('docs/design/STABLE_CONTINUATION_API.md'),
+          ]
+          banned = re.compile(r'\b(typeline|kanban|\bebi\b|wc-typeline|ultracode)\b', re.I)
+          leaks = []
+          for path in docs:
+              for number, line in enumerate(path.read_text(encoding='utf-8').splitlines(), start=1):
+                  if banned.search(line):
+                      leaks.append(f'{path}:{number}: {line}')
+          if leaks:
+              raise SystemExit('internal dogfood terms leaked into public docs:\n' + '\n'.join(leaks))
+          print('public-docs internal-term smoke ok')
+          PY
+
+      - name: Whitespace diff check
+        run: git diff --check origin/${{ github.base_ref || 'main' }}...HEAD
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+  gateway-tests:
+    name: Hermes gateway-dependent tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          path: .hermes-agent
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Full test suite with Hermes checkout
+        env:
+          HERMES_AGENT_PATH: ${{ github.workspace }}/.hermes-agent
+        run: uv run --extra test pytest -q
+
+      - name: Built wheel plugin entry point loads with Hermes checkout
+        env:
+          HERMES_AGENT_PATH: ${{ github.workspace }}/.hermes-agent
+        run: |
+          uv build
+          python -m venv /tmp/ath-wheel-load
+          /tmp/ath-wheel-load/bin/pip install -q dist/*.whl PyYAML
+          cd /tmp
+          PYTHONPATH="$HERMES_AGENT_PATH" /tmp/ath-wheel-load/bin/python - <<'PY'
+          from importlib.metadata import entry_points
+
+          entry = [ep for ep in entry_points(group='hermes_agent.plugins') if ep.name == 'async-threads'][0]
+          plugin = entry.load()
+          assert callable(plugin.register), plugin
+          print('plugin entry point load ok:', plugin.register)
+          PY

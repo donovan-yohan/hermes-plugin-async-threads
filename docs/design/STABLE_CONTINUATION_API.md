@@ -59,6 +59,9 @@ The plugin currently needs a gateway back-reference and then reaches through it 
 | `target_adapter._pending_messages` | queue runtime follow-ups while the session is active | gateway continuation service or adapter public method |
 | `merge_pending_message_event(...)` | merge queued text/media follow-ups safely | gateway continuation service or adapter public method |
 | `target_adapter.handle_message(event)` | start/resume the agent turn when idle | gateway continuation service |
+| `commands.py` direct `gateway.adapters.get(source.platform)` / `adapter.send(...)` | send `/ath` command notices back to the invoking thread | `continuations.deliver()` |
+| `commands.py` direct `build_session_key(...)` plus `gateway.config.group_sessions_per_user/thread_sessions_per_user` | persist the listener's target session identity from `/ath listen` | gateway continuation service |
+| plugin imports of `BasePlatformAdapter`, `MessageEvent`, `MessageType`, `SendResult`, and `SessionSource.from_dict(...)` | adapter subclassing, synthetic runtime events, and stored source hydration | stable gateway/plugin type surface |
 
 The phase-4 routing helper reduced platform-metadata duplication, but it still wraps a private Hermes helper. That is a cleanup, not the final public API.
 
@@ -81,6 +84,7 @@ class ContinuationInjectResult:
     outcome: Literal[
         "agent_started",
         "queued_active_session",
+        "rejected_active_session",
         "target_unavailable",
         "dispatch_failed",
     ]

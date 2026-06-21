@@ -179,6 +179,31 @@ def test_workflow_state_tracks_candidate_gates_and_stale_evidence(tmp_path: Path
     assert listed.workflow_id == "wf-feature-1"
 
 
+def test_parallel_workflow_gates_activate_independently(tmp_path: Path):
+    reg = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    handle = reg.create_handle(
+        source={"platform": "discord", "chat_id": "c", "thread_id": "t", "chat_type": "channel"},
+        producer_id="relay",
+        owner_user_id="u1",
+        workflow_policy=WorkflowPolicy(gate_order=("review", "qa", "deploy"), gate_mode="parallel"),
+    )
+
+    state = reg.update_workflow_state_from_event(
+        handle=handle,
+        fields={"event_id": "evt_started", "event_type": "job.started", "producer_id": "relay", "thread_key": handle.thread_key, "summary": "started"},
+        data={"workflowId": "wf-parallel", "stage": "started", "candidate": {"id": "rc1", "readiness": "ready"}},
+    )
+
+    assert state is not None
+    assert state.gates["active"] == ["review", "qa", "deploy"]
+    assert state.gates["deferred"] == []
+    assert {gate: item["state"] for gate, item in state.gates["states"].items()} == {
+        "review": "pending",
+        "qa": "pending",
+        "deploy": "pending",
+    }
+
+
 def test_serial_candidate_required_gate_blocks_later_gates_and_terminal_stage_persists(tmp_path: Path):
     reg = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
     handle = reg.create_handle(
@@ -377,6 +402,47 @@ def test_sanitize_event_detail_allowlists_and_redacts_safe_metadata():
         "target_adapter_exists": True,
         "target_platform": "discord",
     }
+
+
+def test_sanitize_event_detail_redacts_bare_secret_shapes():
+    detail = sanitize_event_detail(
+        {
+            "error": " ".join([
+                "AKIA" + "IOSFODNN7EXAMPLE",
+                "ghp_" + "abcdefghijklmnopqrstuvwxyz123456",
+                "github_pat_" + ("A" * 22) + "_" + ("B" * 59),
+                "sk-proj-" + "abcdefghijklmnopqrstuvwxyzABCDE12345",
+                "xoxb-" + "123456789012-123456789012-abcdefghijklmnopqrstuv",
+                "eyJ" + ("a" * 12) + "." + ("b" * 12) + "." + ("c" * 12),
+            ]),
+            "exception_message": "-----BEGIN RSA " + "PRIVATE KEY-----\nabc123secret\n-----END RSA " + "PRIVATE KEY-----",
+        }
+    )
+
+    combined = " ".join(str(value) for value in detail.values())
+    for sentinel in ["AKIAIO", "ghp_", "github_pat_", "sk-proj", "xoxb-", "eyJ", "abc123secret"]:
+        assert sentinel not in combined
+    assert "<redacted>" in combined
+
+
+def test_event_log_redacts_bare_secret_shapes_before_storage(tmp_path):
+    reg = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    token = "github_pat_" + ("A" * 22) + "_" + ("B" * 59)
+    reg.log_event(
+        producer_id=token,
+        event_id="evt-" + token,
+        thread_key="ath_123",
+        event_type="ci.build.finished",
+        outcome="delivered",
+        summary="done " + token,
+        detail={"error": "AKIA" + "IOSFODNN7EXAMPLE " + "-----BEGIN RSA " + "PRIVATE KEY-----\nabc123secret\n-----END RSA " + "PRIVATE KEY-----"},
+    )
+
+    [event] = reg.list_recent_events(limit=5)
+    serialized = f"{event.producer_id} {event.event_id} {event.summary} {event.detail}"
+    for sentinel in ["github_pat_", "AKIAIO", "abc123secret"]:
+        assert sentinel not in serialized
+    assert "<redacted>" in serialized or "redacted:" in serialized
 
 
 def test_sanitize_event_detail_bounds_regex_input_before_output_truncation():
