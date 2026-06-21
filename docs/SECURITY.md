@@ -50,6 +50,6 @@ Authenticated accepted events, duplicates, dispatch failures, and authenticated 
 
 The public-release readiness epic tracks remaining hardening before broad shareout:
 
-- add more compatibility evidence before claiming non-Discord gateway support.
+- add live non-Discord gateway smoke evidence before claiming end-to-end support beyond metadata routing coverage.
 
 See https://github.com/donovan-yohan/hermes-plugin-async-threads/issues/33

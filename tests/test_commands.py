@@ -1,6 +1,15 @@
 from types import SimpleNamespace
 
-from async_threads.commands import _cmd_inspect, _cmd_list, _cmd_set_enabled, _run_command, handle_pre_gateway_dispatch
+import pytest
+
+from async_threads.commands import (
+    _cmd_inspect,
+    _cmd_list,
+    _cmd_set_enabled,
+    _run_command,
+    _send_notice,
+    handle_pre_gateway_dispatch,
+)
 from async_threads.registry import AsyncThreadRegistry
 from gateway.config import Platform, PlatformConfig
 from gateway.platform_registry import PlatformEntry, platform_registry
@@ -11,6 +20,15 @@ from async_threads.adapter import AsyncThreadsAdapter
 class FakeAdapter:
     def __init__(self):
         self.config = PlatformConfig(enabled=True, extra={"registry_path": ""})
+
+
+class FakeSendAdapter:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, chat_id, content, reply_to=None, metadata=None):
+        self.sent.append((chat_id, content, metadata))
+        return SimpleNamespace(success=True)
 
 
 class FakeStore:
@@ -93,6 +111,36 @@ def test_pre_gateway_hook_returns_skip_dict_for_ath_help():
     result = handle_pre_gateway_dispatch(event=event, gateway=gateway, session_store=None)
 
     assert result == {"action": "skip", "reason": "async_threads_command"}
+
+
+@pytest.mark.asyncio
+async def test_command_notice_uses_platform_aware_send_metadata():
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="12345",
+        chat_type="dm",
+        thread_id="42",
+        user_id="67890",
+        message_id="99",
+    )
+    target = FakeSendAdapter()
+    gateway = SimpleNamespace(adapters={Platform.TELEGRAM: target})
+    event = SimpleNamespace(source=source)
+
+    await _send_notice(gateway, event, "async-thread status")
+
+    assert target.sent == [
+        (
+            "12345",
+            "async-thread status",
+            {
+                "thread_id": "42",
+                "telegram_dm_topic_reply_fallback": True,
+                "direct_messages_topic_id": "42",
+                "telegram_reply_to_message_id": "99",
+            },
+        )
+    ]
 
 
 def test_listener_management_commands_are_owner_scoped(tmp_path):

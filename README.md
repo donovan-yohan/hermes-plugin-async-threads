@@ -13,8 +13,9 @@ This repository is an MVP. It is useful, but it is not a blanket promise that ev
 | Surface | Status |
 | --- | --- |
 | Discord gateway sessions | Tested MVP path |
-| Telegram gateway sessions | Intended, needs compatibility tests |
-| Slack and other gateway adapters | Intended, unverified |
+| Telegram gateway sessions | Metadata helper covered for DM/topic routing; live gateway smoke pending |
+| Slack gateway sessions | Generic thread metadata covered; live gateway smoke pending |
+| Other gateway adapters | Intended, unverified |
 | CLI | Producer helper only; no `listen here` listener UX |
 | Hermes Desktop/API server | Unverified |
 | Multi-gateway or multi-profile routing | Unsupported in the MVP; receiver assumes the target adapter is connected in the same gateway process/profile |
@@ -110,11 +111,10 @@ See [`docs/SECURITY.md`](docs/SECURITY.md) for more detail.
 ## Known limitations
 
 - Gateway-local MVP: dispatch assumes the target platform adapter is connected in the same gateway process/profile.
-- Non-Discord gateway routing is intended but not yet backed by compatibility tests.
-- Direct delivery and acknowledgement metadata currently use a small metadata shape and need a stable platform-aware continuation helper.
+- Non-Discord routing has unit coverage for shared send metadata, Telegram DM/topic metadata, and Slack-style generic thread metadata; live gateway smokes are still pending.
+- Direct delivery, acknowledgement, and command notices share a centralized send-metadata helper, but the helper still wraps a private Hermes gateway function until the stable continuation API spike lands.
 - Active-session queueing currently relies on Hermes gateway/adapter internals.
 - CLI and Hermes Desktop cannot create a listener from “here” yet.
-- Coalesced event retry semantics and unauthenticated diagnostic persistence are tracked for hardening before public shareout.
 
 ## Development
 

@@ -11,6 +11,7 @@ from typing import Any, Mapping
 from .privacy import redact_metadata_text, safe_event_id
 from .registry import AsyncThreadHandle, AsyncThreadRegistry, safe_session_key_hash
 from .rendering import render_event_message, tail_mode_from_event
+from .routing import send_metadata_for_source
 from .security import (
     DEFAULT_REPLAY_WINDOW_SECONDS,
     EventValidationError,
@@ -365,7 +366,7 @@ def _build_adapter_base():
                 summary=fields.get("summary", ""),
             )
             if handle.policy == "direct":
-                metadata = {"thread_id": source.thread_id} if source.thread_id else None
+                metadata = send_metadata_for_source(source)
                 try:
                     result = await target_adapter.send(source.chat_id, text, metadata=metadata)
                 except Exception as exc:
@@ -664,7 +665,7 @@ def _build_adapter_base():
                 thread_key=handle.thread_key,
                 outcome=outcome,
             )
-            metadata = {"thread_id": source.thread_id} if source.thread_id else None
+            metadata = send_metadata_for_source(source)
             detail["ack_sent"] = True
             try:
                 result = await target_adapter.send(source.chat_id, content, metadata=metadata)
