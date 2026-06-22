@@ -9,6 +9,7 @@ from typing import Any
 
 from .adapter import registry_from_config, registry_path_from_config
 from .listeners import ListenValidationError, create_listener
+from .origin import remember_gateway_origin
 from .privacy import redact_metadata_text, redact_secret_text, safe_event_id
 from .registry import safe_session_key_hash
 from .routing import send_metadata_for_source
@@ -59,6 +60,7 @@ def handle_pre_gateway_dispatch(**kwargs):
         if not auth_fn(source):
             # Let the normal gateway auth path handle/drop the message.
             return {"action": "allow"}
+        remember_gateway_origin(event=event, gateway=gateway, session_store=kwargs.get("session_store"))
     except Exception:
         return {"action": "allow"}
 
