@@ -14,16 +14,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .continuation import ContinuationPolicy
 from .privacy import redact_metadata_text, redact_secret_text, safe_event_id
 from .workflows import WorkflowPolicy, apply_workflow_transition, normalize_workflow_event
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SAFE_DETAIL_KEYS = {
     "ack_mode",
     "ack_sent",
     "ack_success",
+    "continuation_core_enforced",
+    "continuation_fail_closed",
+    "continuation_limit_reason",
+    "continuation_policy",
     "coalesced_count",
     "coalesced_reason",
     "debounce_seconds",
@@ -72,6 +77,7 @@ class AsyncThreadHandle:
     ack_mode: str = "none"
     debounce_seconds: int = 0
     workflow_policy: WorkflowPolicy = field(default_factory=WorkflowPolicy)
+    continuation_policy: ContinuationPolicy = field(default_factory=ContinuationPolicy)
     created_at: str = ""
     updated_at: str = ""
 
@@ -168,7 +174,8 @@ class AsyncThreadRegistry:
                     policy text not null default 'agent_queue',
                     ack_mode text not null default 'none',
                     debounce_seconds integer not null default 0,
-                    workflow_policy_json text not null default '{}'
+                    workflow_policy_json text not null default '{}',
+                    continuation_policy_json text not null default '{}'
                 );
 
                 create index if not exists idx_async_thread_handles_owner
@@ -251,6 +258,8 @@ class AsyncThreadRegistry:
             conn.execute("alter table async_thread_handles add column debounce_seconds integer not null default 0")
         if "workflow_policy_json" not in handle_columns:
             conn.execute("alter table async_thread_handles add column workflow_policy_json text not null default '{}'")
+        if "continuation_policy_json" not in handle_columns:
+            conn.execute("alter table async_thread_handles add column continuation_policy_json text not null default '{}'")
 
     def create_handle(
         self,
@@ -266,12 +275,16 @@ class AsyncThreadRegistry:
         ack_mode: str = "none",
         debounce_seconds: int = 0,
         workflow_policy: WorkflowPolicy | dict[str, Any] | None = None,
+        continuation_policy: ContinuationPolicy | dict[str, Any] | None = None,
     ) -> AsyncThreadHandle:
         producer_id = _clean_token(producer_id, default="default")
         policy = policy if policy in {"agent_queue", "direct"} else "agent_queue"
         ack_mode = ack_mode if ack_mode in {"none", "brief", "debug"} else "none"
         debounce_seconds = max(0, min(int(debounce_seconds or 0), 300))
         workflow_policy_obj = workflow_policy if isinstance(workflow_policy, WorkflowPolicy) else WorkflowPolicy.from_mapping(workflow_policy)
+        continuation_policy_obj = (
+            continuation_policy if isinstance(continuation_policy, ContinuationPolicy) else ContinuationPolicy.from_mapping(continuation_policy)
+        )
         thread_key = f"ath_{secrets.token_urlsafe(12).replace('-', '').replace('_', '')[:16]}"
         secret = secrets.token_urlsafe(32)
         now = utc_now()
@@ -282,8 +295,9 @@ class AsyncThreadRegistry:
                 insert into async_thread_handles(
                     thread_key, created_at, updated_at, enabled, label, source_json,
                     session_key, session_id, owner_user_id, producer_id, secret,
-                    allowed_event_types_json, policy, ack_mode, debounce_seconds, workflow_policy_json
-                ) values (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    allowed_event_types_json, policy, ack_mode, debounce_seconds, workflow_policy_json,
+                    continuation_policy_json
+                ) values (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     thread_key,
@@ -301,6 +315,7 @@ class AsyncThreadRegistry:
                     ack_mode,
                     debounce_seconds,
                     workflow_policy_obj.to_json(),
+                    continuation_policy_obj.to_json(),
                 ),
             )
         return self.get_handle(thread_key)  # type: ignore[return-value]
@@ -674,6 +689,7 @@ def _row_to_handle(row: sqlite3.Row) -> AsyncThreadHandle:
         ack_mode=row["ack_mode"] or "none",
         debounce_seconds=int(row["debounce_seconds"] or 0),
         workflow_policy=WorkflowPolicy.from_json(row["workflow_policy_json"] if "workflow_policy_json" in row.keys() else "{}"),
+        continuation_policy=ContinuationPolicy.from_json(row["continuation_policy_json"] if "continuation_policy_json" in row.keys() else "{}"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -772,10 +788,30 @@ def sanitize_event_detail(detail: dict[str, Any] | None) -> dict[str, Any]:
         key_text = str(key)
         if key_text not in SAFE_DETAIL_KEYS or UNSAFE_DETAIL_KEY_RE.search(key_text):
             continue
+        if key_text == "continuation_policy" and isinstance(value, dict):
+            sanitized[key_text] = _sanitize_continuation_policy(value)
+            continue
         cleaned = _sanitize_detail_value(value)
         if cleaned is not None:
             sanitized[key_text] = cleaned
     return sanitized
+
+
+def _sanitize_continuation_policy(value: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key in ("maxTurns", "maxToolCalls", "timeoutSeconds"):
+        try:
+            safe[key] = int(value.get(key, 0))
+        except (TypeError, ValueError):
+            safe[key] = 0
+    toolsets = value.get("toolsets", [])
+    if isinstance(toolsets, list):
+        safe["toolsets"] = [redact_metadata_text(str(item))[:40] for item in toolsets[:8] if str(item).strip()]
+    else:
+        safe["toolsets"] = []
+    safe["failClosedWithoutCoreBounds"] = bool(value.get("failClosedWithoutCoreBounds", False))
+    safe["coreEnforced"] = bool(value.get("coreEnforced", False))
+    return safe
 
 
 def safe_session_key_hash(session_key: str | None) -> str:

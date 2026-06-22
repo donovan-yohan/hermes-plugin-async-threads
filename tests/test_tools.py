@@ -51,10 +51,16 @@ class FakeSendAdapter:
     def __init__(self):
         self.config = SimpleNamespace(extra={"group_sessions_per_user": True, "thread_sessions_per_user": False})
         self.sent = []
+        self.handled = []
+        self._active_sessions = {}
+        self._pending_messages = {}
 
     async def send(self, chat_id, content, reply_to=None, metadata=None):
         self.sent.append((chat_id, content, metadata))
         return SimpleNamespace(success=True)
+
+    async def handle_message(self, event):
+        self.handled.append(event)
 
 
 class FakePluginContext:
@@ -206,6 +212,122 @@ def test_create_listener_tool_creates_current_origin_listener_without_secret(tmp
     assert json.load(open(contract_file, encoding="utf-8"))["secretFile"] == secret_file
     if os.name == "posix":
         assert oct(os.stat(secret_file).st_mode & 0o777) == "0o600"
+
+
+def test_create_listener_tool_records_explicit_continuation_policy(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    result = _loads(
+        ath_create_listener_tool(
+            {
+                "purpose": "watch this build and report back here",
+                "producer_hint": "demo-ci",
+                "max_turns": 2,
+                "max_tool_calls": 3,
+                "timeout_seconds": 90,
+                "continuation_toolsets": ["web", "terminal"],
+            },
+            **_tool_kwargs(registry, tmp_path),
+        )
+    )
+
+    policy = result["listener"]["continuationPolicy"]
+    assert policy == {
+        "coreEnforced": False,
+        "failClosedWithoutCoreBounds": False,
+        "maxToolCalls": 3,
+        "maxTurns": 2,
+        "timeoutSeconds": 90,
+        "toolsets": ["web", "terminal"],
+    }
+    handle = registry.get_handle(result["listener"]["threadKey"])
+    assert handle is not None
+    assert handle.continuation_policy.max_turns == 2
+    assert handle.continuation_policy.max_tool_calls == 3
+    assert handle.continuation_policy.timeout_seconds == 90
+
+
+def test_create_listener_tool_does_not_reuse_when_continuation_policy_differs(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    base = {
+        "purpose": "watch this build and report back here",
+        "producer_hint": "demo-ci",
+        "event_kinds": ["finished"],
+    }
+    first = _loads(ath_create_listener_tool({**base, "max_turns": 1}, **_tool_kwargs(registry, tmp_path)))
+    second = _loads(ath_create_listener_tool({**base, "max_turns": 2}, **_tool_kwargs(registry, tmp_path)))
+
+    assert first["action"] == "created"
+    assert second["action"] == "created"
+    assert first["listener"]["threadKey"] != second["listener"]["threadKey"]
+
+
+@pytest.mark.asyncio
+async def test_tool_created_agent_queue_signed_events_route_safely_and_dedupe(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    kwargs = _tool_kwargs(registry, tmp_path)
+    created = _loads(
+        ath_create_listener_tool(
+            {
+                "purpose": "watch this build and report back here",
+                "producer_hint": "demo-ci",
+                "event_kinds": ["finished"],
+                "max_turns": 1,
+                "max_tool_calls": 0,
+                "timeout_seconds": 60,
+            },
+            **kwargs,
+        )
+    )
+    handle = registry.get_handle(created["listener"]["threadKey"])
+    assert handle is not None
+    target = FakeSendAdapter()
+    adapter = AsyncThreadsAdapter(kwargs["config"])
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+
+    body = _event_body(handle, event_id="evt-runtime-finished", event_type="demo-ci.finished")
+    first = await adapter._handle_event(FakeRequest(body, handle.secret))
+    duplicate = await adapter._handle_event(FakeRequest(body, handle.secret))
+    wrong_type = await adapter._handle_event(FakeRequest(_event_body(handle, event_id="evt-runtime-wrong", event_type="demo-ci.started"), handle.secret))
+
+    assert first.status == 202
+    assert json.loads(first.text)["status"] == "accepted"
+    assert json.loads(duplicate.text)["status"] == "duplicate"
+    assert wrong_type.status == 401
+    assert len(target.handled) == 1
+    event = target.handled[0]
+    assert event.internal is True
+    assert event.source.chat_id == "channel-1"
+    assert event.source.thread_id == "thread-1"
+    assert "untrusted data" in event.text
+    assert "ignore previous instructions" in event.text
+    assert event.raw_message["continuationPolicy"] == {
+        "coreEnforced": False,
+        "failClosedWithoutCoreBounds": False,
+        "maxToolCalls": 0,
+        "maxTurns": 1,
+        "timeoutSeconds": 60,
+        "toolsets": [],
+    }
+    assert event.raw_message["continuationPolicyCoreEnforced"] is False
+    recent = registry.list_recent_events(thread_key=handle.thread_key, limit=5)
+    outcomes = [entry.outcome for entry in recent]
+    assert "duplicate" in outcomes
+    assert "agent_started" in outcomes
+    delivered = next(entry for entry in recent if entry.outcome == "agent_started")
+    assert delivered.detail["continuation_core_enforced"] is False
+    assert delivered.detail["continuation_policy"]["maxTurns"] == 1
+
+    target._active_sessions[handle.session_key] = asyncio.Event()
+    queued = await adapter._handle_event(FakeRequest(_event_body(handle, event_id="evt-runtime-active", event_type="demo-ci.finished"), handle.secret))
+    assert queued.status == 202
+    assert json.loads(queued.text)["status"] == "queued"
+    assert len(target.handled) == 1
+    assert handle.session_key in target._pending_messages
+
+    registry.set_enabled(handle.thread_key, False)
+    retired = await adapter._handle_event(FakeRequest(_event_body(handle, event_id="evt-runtime-retired", event_type="demo-ci.finished"), handle.secret))
+    assert retired.status == 401
+    assert len(target.handled) == 1
 
 
 def test_create_listener_tool_uses_public_url_for_model_output(tmp_path):

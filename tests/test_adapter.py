@@ -346,6 +346,15 @@ async def test_dispatch_idle_injects_message_into_target_adapter(tmp_path):
         "ack_mode": "none",
         "ack_sent": False,
         "active_session": False,
+        "continuation_core_enforced": False,
+        "continuation_policy": {
+            "coreEnforced": False,
+            "failClosedWithoutCoreBounds": False,
+            "maxToolCalls": 0,
+            "maxTurns": 1,
+            "timeoutSeconds": 120,
+            "toolsets": [],
+        },
         "gateway_runner_exists": True,
         "handle_message_called": True,
         "handle_message_returned": True,
@@ -978,6 +987,40 @@ async def test_priority_failure_dispatch_failure_keeps_original_ids_retryable(tm
     retry_progress = await adapter._handle_event(FakeRequest(progress_body, handle.secret))
     assert json.loads(retry_progress.text)["status"] == "queued"
     await adapter._flush_coalesced(handle.thread_key, reason="cleanup")
+
+
+@pytest.mark.asyncio
+async def test_agent_queue_strict_bounds_fail_closed_when_core_caps_unavailable(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(
+        source=source.to_dict(),
+        producer_id="relay",
+        continuation_policy={
+            "max_turns": 1,
+            "max_tool_calls": 0,
+            "timeout_seconds": 60,
+            "fail_closed_without_core_bounds": True,
+        },
+    )
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+    body = _event_body(handle, event_id="evt_strict_bounds")
+
+    first = await adapter._handle_event(FakeRequest(body, handle.secret))
+    retry = await adapter._handle_event(FakeRequest(body, handle.secret))
+
+    assert first.status == 502
+    assert retry.status == 502
+    assert target.handled == []
+    events = registry.list_recent_events(thread_key=handle.thread_key, limit=2)
+    assert [event.outcome for event in events] == ["dispatch_failed", "dispatch_failed"]
+    assert events[0].detail["continuation_fail_closed"] is True
+    assert events[0].detail["continuation_core_enforced"] is False
+    assert events[0].detail["continuation_limit_reason"] == "core_bounds_unavailable"
+    assert events[0].detail["continuation_policy"]["failClosedWithoutCoreBounds"] is True
 
 
 @pytest.mark.asyncio

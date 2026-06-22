@@ -7,6 +7,7 @@ import re
 from types import SimpleNamespace
 from typing import Any, Iterable, Mapping
 
+from .continuation import ContinuationPolicy
 from .adapter import registry_from_config
 from .handoffs import build_producer_handoff, handoff_root_from_config
 from .listeners import ListenValidationError, create_listener
@@ -33,6 +34,11 @@ _CREATE_SCHEMA = {
             "target": {"type": "string", "enum": ["current_conversation"], "description": "Only current_conversation is supported."},
             "reuse": {"type": "boolean", "description": "Reuse an equivalent active listener when one exists. Default true."},
             "label": {"type": "string", "description": "Optional display label. Defaults to purpose."},
+            "max_turns": {"type": "integer", "description": "Agent-queue continuation intent. Default 1; metadata only until Hermes exposes plugin-enforced per-event caps."},
+            "max_tool_calls": {"type": "integer", "description": "Agent-queue tool-call cap intent. Default 0."},
+            "timeout_seconds": {"type": "integer", "description": "Agent-queue timeout intent. Default 120 seconds."},
+            "continuation_toolsets": {"type": "array", "items": {"type": "string"}, "description": "Optional toolsets intended for bounded continuation metadata."},
+            "fail_closed_without_core_bounds": {"type": "boolean", "description": "If true, reject agent_queue dispatch while Hermes core lacks hard per-event bounds."},
         },
         "required": ["purpose"],
     },
@@ -200,6 +206,7 @@ def ath_create_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
             event_types=tuple(spec["event_types"]),
             policy=spec["policy"],
             ack_mode=spec["ack_mode"],
+            continuation_policy=spec["continuation_policy"],
         )
         if existing is not None:
             return _json(
@@ -224,6 +231,7 @@ def ath_create_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
             session_id=origin.session_id,
             owner_user_id=origin.owner_user_id,
             event_url=_event_url(config),
+            continuation_policy=spec["continuation_policy"],
         )
     except ListenValidationError as exc:
         return _json(_error("invalid_request", str(exc)))
@@ -433,12 +441,20 @@ def _listener_spec(args: Mapping[str, Any]) -> dict[str, Any]:
         ack_mode = "brief"
     if policy == "direct":
         ack_mode = "none"
+    continuation_policy = {
+        "max_turns": _bounded_int(args.get("max_turns"), default=1, minimum=1, maximum=5),
+        "max_tool_calls": _bounded_int(args.get("max_tool_calls"), default=0, minimum=0, maximum=20),
+        "timeout_seconds": _bounded_int(args.get("timeout_seconds"), default=120, minimum=10, maximum=600),
+        "toolsets": [str(item) for item in _as_list(args.get("continuation_toolsets")) if str(item).strip()],
+        "fail_closed_without_core_bounds": bool(args.get("fail_closed_without_core_bounds", False)),
+    }
     return {
         "producer_id": producer_id,
         "event_types": tuple(event_types),
         "label": str(args.get("label") or purpose)[:120],
         "policy": policy,
         "ack_mode": ack_mode,
+        "continuation_policy": continuation_policy,
     }
 
 
@@ -451,7 +467,9 @@ def _find_equivalent_listener(
     event_types: tuple[str, ...],
     policy: str,
     ack_mode: str,
+    continuation_policy: Mapping[str, Any],
 ) -> AsyncThreadHandle | None:
+    expected_continuation = ContinuationPolicy.from_mapping(continuation_policy).to_mapping()
     for handle in registry.list_handles(owner_user_id=owner_user_id, include_disabled=False):
         if handle.producer_id != producer_id:
             continue
@@ -460,6 +478,8 @@ def _find_equivalent_listener(
         if handle.policy != policy:
             continue
         if handle.ack_mode != ack_mode:
+            continue
+        if handle.continuation_policy.to_mapping() != expected_continuation:
             continue
         if _same_origin(handle, origin):
             return handle
@@ -512,6 +532,7 @@ def _handle_summary(
         "sessionKeyPresent": bool(handle.session_key),
         "sessionId": handle.session_id,
         "secretAvailable": bool(handle.secret),
+        "continuationPolicy": handle.continuation_policy.public_summary(core_enforced=False),
     }
     summary["secretRef"] = describe_secret_artifact(
         handle,

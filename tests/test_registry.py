@@ -42,6 +42,7 @@ def test_registry_creates_lists_revokes_and_dedupes(tmp_path: Path):
     assert "detail_json" in event_log_columns
     assert "ack_mode" in handle_columns
     assert "workflow_policy_json" in handle_columns
+    assert "continuation_policy_json" in handle_columns
     assert schema_version == str(SCHEMA_VERSION)
 
     listed = reg.list_handles(owner_user_id="u1")
@@ -352,6 +353,7 @@ def test_v1_registry_migrates_detail_json_without_data_loss(tmp_path: Path):
     assert "detail_json" in columns
     assert "ack_mode" in handle_columns
     assert "workflow_policy_json" in handle_columns
+    assert "continuation_policy_json" in handle_columns
     assert schema_version == str(SCHEMA_VERSION)
     assert detail_json == "{}"
     assert ack_mode == "none"

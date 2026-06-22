@@ -137,6 +137,12 @@ For normal bridges, prefer:
 
 Raw logs, terminal bytes, transcripts, secrets, tokens, cookies, and authorization headers do not belong in routine events.
 
+## Agent-queue continuation bounds
+
+Model-created `agent_queue` listeners store a continuation policy with intended `maxTurns`, `maxToolCalls`, `timeoutSeconds`, and optional toolsets. Current Hermes core does not expose a plugin-local hard cap for an individual synthetic gateway event, so runtime diagnostics and `MessageEvent.raw_message` mark this as `coreEnforced: false` until that core seam exists. If a listener is configured with `failClosedWithoutCoreBounds`, the receiver rejects the signed event with a retryable dispatch failure instead of starting an unbounded continuation.
+
+This is deliberately visible in trace/event diagnostics; producers should treat a `502` from strict bounded mode as retryable after operator/config remediation, not as an auth failure.
+
 ## Idempotency and retries
 
 Idempotency means the producer can retry safely without creating duplicate visible work.

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
+from .continuation import ContinuationPolicy
 from .registry import AsyncThreadHandle, AsyncThreadRegistry
 from .workflows import WorkflowPolicy
 
@@ -38,6 +39,7 @@ class ListenRequest:
     stale_on_artifact_change: tuple[str, ...] = ()
     candidate_required: tuple[str, ...] = ()
     workflow_policy: WorkflowPolicy = field(default_factory=WorkflowPolicy)
+    continuation_policy: ContinuationPolicy = field(default_factory=ContinuationPolicy)
 
 
 @dataclass(frozen=True)
@@ -95,6 +97,7 @@ class ListenResult:
                 "stale_on_artifact_change": list(self.handle.workflow_policy.stale_on_artifact_change),
                 "candidate_required": list(self.handle.workflow_policy.candidate_required),
             },
+            "continuationPolicy": self.handle.continuation_policy.public_summary(core_enforced=False),
             "eventUrl": self.event_url,
             "source": self.source,
             "sessionKeyPresent": bool(self.session_key),
@@ -114,6 +117,7 @@ def create_listener(
     ack_mode: str = "none",
     debounce_seconds: Any = 0,
     workflow_policy: WorkflowPolicy | Mapping[str, Any] | None = None,
+    continuation_policy: ContinuationPolicy | Mapping[str, Any] | None = None,
     gate_order: Iterable[str] = (),
     gate_mode: str = "serial",
     stale_on_artifact_change: Iterable[str] = (),
@@ -138,6 +142,7 @@ def create_listener(
         ack_mode=ack_mode,
         debounce_seconds=debounce_seconds,
         workflow_policy=workflow_policy,
+        continuation_policy=continuation_policy,
         gate_order=gate_order,
         gate_mode=gate_mode,
         stale_on_artifact_change=stale_on_artifact_change,
@@ -160,6 +165,7 @@ def create_listener(
         ack_mode=request.ack_mode,
         debounce_seconds=request.debounce_seconds,
         workflow_policy=request.workflow_policy,
+        continuation_policy=request.continuation_policy,
     )
     return ListenResult(
         handle=handle,
@@ -179,6 +185,7 @@ def normalize_listen_request(
     ack_mode: str = "none",
     debounce_seconds: Any = 0,
     workflow_policy: WorkflowPolicy | Mapping[str, Any] | None = None,
+    continuation_policy: ContinuationPolicy | Mapping[str, Any] | None = None,
     gate_order: Iterable[str] = (),
     gate_mode: str = "serial",
     stale_on_artifact_change: Iterable[str] = (),
@@ -215,6 +222,9 @@ def normalize_listen_request(
         stale_on_artifact_change=stale_on_artifact_change,
         candidate_required=candidate_required,
     )
+    continuation_policy_obj = (
+        continuation_policy if isinstance(continuation_policy, ContinuationPolicy) else ContinuationPolicy.from_mapping(continuation_policy)
+    )
     return ListenRequest(
         producer_id=str(producer_id or ""),
         allowed_event_types=tuple(str(event_type) for event_type in allowed_event_types),
@@ -228,6 +238,7 @@ def normalize_listen_request(
         stale_on_artifact_change=tuple(str(item) for item in stale_on_artifact_change),
         candidate_required=tuple(str(item) for item in candidate_required),
         workflow_policy=workflow_policy_obj,
+        continuation_policy=continuation_policy_obj,
     )
 
 
