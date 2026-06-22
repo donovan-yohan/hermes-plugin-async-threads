@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import os
 import time
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ from async_threads.tools import (
     ath_get_listener_tool,
     ath_list_listeners_tool,
     ath_retire_listener_tool,
+    ath_rotate_listener_secret_tool,
     ath_trace_event_tool,
 )
 from gateway.config import Platform, PlatformConfig
@@ -104,7 +106,15 @@ def _entry(source=None, session_id="sid-1", session_key="key-1"):
 def _tool_kwargs(registry, tmp_path, entry=None):
     return {
         "registry": registry,
-        "config": PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3"), "host": "127.0.0.1", "port": 9999}),
+        "config": PlatformConfig(
+            enabled=True,
+            extra={
+                "registry_path": str(tmp_path / "ath.sqlite3"),
+                "host": "127.0.0.1",
+                "port": 9999,
+                "secret_root": str(tmp_path / "secrets"),
+            },
+        ),
         "session_id": (entry or _entry()).session_id,
         "session_store": FakeStore(entry or _entry()),
     }
@@ -139,6 +149,7 @@ def test_plugin_registers_model_facing_tools():
         "ath_list_listeners",
         "ath_get_listener",
         "ath_retire_listener",
+        "ath_rotate_listener_secret",
         "ath_trace_event",
     }
     assert {entry["toolset"] for entry in ctx.tools.values()} == {"plugin_async_threads"}
@@ -170,12 +181,18 @@ def test_create_listener_tool_creates_current_origin_listener_without_secret(tmp
     assert listener["target"]["thread_id"] == "thread-1"
     handle = registry.get_handle(listener["threadKey"])
     assert handle is not None
+    secret_file = result["secret"]["secretFile"]
+    contract_file = result["secret"]["contractFile"]
     assert handle.secret not in json.dumps(result, sort_keys=True)
-    assert result["secret"] == {
-        "available": True,
-        "returned": False,
-        "reason": "raw signing secrets are intentionally not returned by lifecycle tools; use the emitter/secret workflow once configured",
-    }
+    assert result["secret"]["returned"] is False
+    assert result["secret"]["env"] == {"ATH_SECRET_FILE": secret_file}
+    assert listener["secretRef"]["secretFile"] == secret_file
+    assert str(tmp_path / "secrets") in secret_file
+    assert "/hermes-plugin-async-threads" not in secret_file
+    assert open(secret_file, encoding="utf-8").read().strip() == handle.secret
+    assert json.load(open(contract_file, encoding="utf-8"))["secretFile"] == secret_file
+    if os.name == "posix":
+        assert oct(os.stat(secret_file).st_mode & 0o777) == "0o600"
 
 
 def test_create_listener_tool_reuses_equivalent_active_listener(tmp_path):
@@ -237,6 +254,8 @@ def test_list_inspect_and_retire_are_owner_scoped_and_hide_secret(tmp_path):
     inspected = _loads(ath_get_listener_tool({"thread_key": ours.thread_key}, **_tool_kwargs(registry, tmp_path)))
     assert inspected["ok"] is True
     assert inspected["listener"]["secretAvailable"] is True
+    secret_file = inspected["listener"]["secretRef"]["secretFile"]
+    assert open(secret_file, encoding="utf-8").read().strip() == ours.secret
     assert ours.secret not in json.dumps(inspected, sort_keys=True)
 
     denied = _loads(ath_get_listener_tool({"thread_key": theirs.thread_key}, **_tool_kwargs(registry, tmp_path)))
@@ -244,8 +263,46 @@ def test_list_inspect_and_retire_are_owner_scoped_and_hide_secret(tmp_path):
     assert denied["error"] == "not_found"
 
     retired = _loads(ath_retire_listener_tool({"thread_key": ours.thread_key}, **_tool_kwargs(registry, tmp_path)))
-    assert retired == {"action": "retired", "enabled": False, "ok": True, "threadKey": ours.thread_key}
+    assert retired == {"action": "retired", "enabled": False, "ok": True, "secretMaterialRemoved": True, "threadKey": ours.thread_key}
     assert registry.get_handle(ours.thread_key).enabled is False
+    assert not os.path.exists(secret_file)
+
+
+@pytest.mark.asyncio
+async def test_rotate_listener_secret_invalidates_old_secret_and_refreshes_secret_file(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    created = _loads(
+        ath_create_listener_tool(
+            {"purpose": "watch build", "producer_hint": "demo-ci", "event_kinds": ["finished"], "delivery": "direct"},
+            **_tool_kwargs(registry, tmp_path),
+        )
+    )
+    thread_key = created["listener"]["threadKey"]
+    old_handle = registry.get_handle(thread_key)
+    assert old_handle is not None
+    old_secret = old_handle.secret
+    secret_file = created["secret"]["secretFile"]
+    assert open(secret_file, encoding="utf-8").read().strip() == old_secret
+
+    rotated = _loads(ath_rotate_listener_secret_tool({"thread_key": thread_key}, **_tool_kwargs(registry, tmp_path)))
+
+    assert rotated["ok"] is True
+    assert rotated["action"] == "rotated"
+    new_handle = registry.get_handle(thread_key)
+    assert new_handle is not None
+    assert new_handle.secret != old_secret
+    assert open(rotated["secret"]["secretFile"], encoding="utf-8").read().strip() == new_handle.secret
+    assert old_secret not in json.dumps(rotated, sort_keys=True)
+    assert new_handle.secret not in json.dumps(rotated, sort_keys=True)
+
+    target = FakeSendAdapter()
+    adapter = AsyncThreadsAdapter(PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")}))
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+    old_secret_response = await adapter._handle_event(FakeRequest(_event_body(new_handle, event_id="evt-old"), old_secret))
+    new_secret_response = await adapter._handle_event(FakeRequest(_event_body(new_handle, event_id="evt-new"), new_handle.secret))
+    assert old_secret_response.status == 401
+    assert new_secret_response.status == 200
+    assert len(target.sent) == 1
 
 
 def test_trace_event_tool_is_owner_scoped(tmp_path):

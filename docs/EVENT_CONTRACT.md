@@ -18,7 +18,7 @@ Accepted signature header names, in lookup order:
 2. `X-Hermes-Signature`
 3. `X-Hub-Signature-256`
 
-Sign the exact UTF-8 request body bytes with the HMAC secret shown once by `/ath listen`:
+Sign the exact UTF-8 request body bytes with the HMAC secret referenced by the listener's generated `secret.txt` file:
 
 ```text
 hex_hmac_sha256 = HMAC-SHA256(secret, raw_request_body)

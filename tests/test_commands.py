@@ -43,7 +43,7 @@ class FakeStore:
         return SimpleNamespace(session_id="sid1")
 
 
-def test_listen_captures_current_source_and_returns_secret(tmp_path):
+def test_listen_captures_current_source_and_returns_secret_reference(tmp_path):
     registry_path = tmp_path / "ath.sqlite3"
     if not platform_registry.is_registered("async_threads"):
         platform_registry.register(
@@ -54,7 +54,12 @@ def test_listen_captures_current_source_and_returns_secret(tmp_path):
                 check_fn=lambda: True,
             )
         )
-    async_adapter = SimpleNamespace(config=PlatformConfig(enabled=True, extra={"registry_path": str(registry_path), "port": 9999}))
+    async_adapter = SimpleNamespace(
+        config=PlatformConfig(
+            enabled=True,
+            extra={"registry_path": str(registry_path), "port": 9999, "secret_root": str(tmp_path / "secrets")},
+        )
+    )
     gateway = SimpleNamespace(
         adapters={Platform("async_threads"): async_adapter},
         config=SimpleNamespace(group_sessions_per_user=True, thread_sessions_per_user=False),
@@ -71,7 +76,9 @@ def test_listen_captures_current_source_and_returns_secret(tmp_path):
 
     assert "created async-thread listener" in response
     assert "threadKey:" in response
-    assert "secret:" in response
+    assert "secretFile:" in response
+    assert "contractFile:" in response
+    assert "raw secret is not printed" in response
     assert "relay.session.pr_opened" in response
     assert "ack: `brief`" in response
     assert "debounce: `45s`" in response
@@ -81,6 +88,9 @@ def test_listen_captures_current_source_and_returns_secret(tmp_path):
     assert handle.debounce_seconds == 45
     assert handle.workflow_policy.gate_order == ("review", "qa")
     assert handle.workflow_policy.candidate_required == ("qa",)
+    assert handle.secret not in response
+    secret_file = tmp_path / "secrets" / handle.thread_key / "secret.txt"
+    assert secret_file.read_text(encoding="utf-8").strip() == handle.secret
 
     direct_response = _run_command(
         "listen relay --policy direct --ack debug",
@@ -90,6 +100,15 @@ def test_listen_captures_current_source_and_returns_secret(tmp_path):
     assert "policy: `direct`" in direct_response
     assert "ack: `none`" in direct_response
     assert "debounce: `0s`" in direct_response
+
+    rotate_response = _run_command(f"rotate-secret {handle.thread_key}", event=event, gateway=gateway)
+    rotated = AsyncThreadRegistry(registry_path).get_handle(handle.thread_key)
+    assert rotated is not None
+    assert rotated.secret != handle.secret
+    assert "rotated async-thread listener secret" in rotate_response
+    assert "secretFile:" in rotate_response
+    assert rotated.secret not in rotate_response
+    assert secret_file.read_text(encoding="utf-8").strip() == rotated.secret
 
     bad_response = _run_command(
         "listen relay --debounce 999",

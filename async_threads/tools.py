@@ -12,6 +12,7 @@ from .listeners import ListenValidationError, create_listener
 from .origin import OriginResolution, resolve_current_origin
 from .privacy import redact_metadata_text, safe_event_id
 from .registry import AsyncThreadHandle, AsyncThreadRegistry, sanitize_event_detail
+from .secrets import describe_secret_artifact, remove_secret_artifact, secret_root_from_config
 
 TOOLSET = "plugin_async_threads"
 
@@ -61,6 +62,16 @@ _INSPECT_SCHEMA = {
 _RETIRE_SCHEMA = {
     "name": "ath_retire_listener",
     "description": "Retire/revoke an async-thread listener scoped to the current owner.",
+    "parameters": {
+        "type": "object",
+        "properties": {"thread_key": {"type": "string", "description": "ATH listener thread key."}},
+        "required": ["thread_key"],
+    },
+}
+
+_ROTATE_SCHEMA = {
+    "name": "ath_rotate_listener_secret",
+    "description": "Rotate a listener signing secret and refresh its local secret-file reference. The raw secret is never returned.",
     "parameters": {
         "type": "object",
         "properties": {"thread_key": {"type": "string", "description": "ATH listener thread key."}},
@@ -118,6 +129,14 @@ def register_tools(ctx: Any) -> None:
         emoji="🧵",
     )
     ctx.register_tool(
+        name="ath_rotate_listener_secret",
+        toolset=TOOLSET,
+        schema=_ROTATE_SCHEMA,
+        handler=ath_rotate_listener_secret_tool,
+        description=_ROTATE_SCHEMA["description"],
+        emoji="🧵",
+    )
+    ctx.register_tool(
         name="ath_trace_event",
         toolset=TOOLSET,
         schema=_TRACE_SCHEMA,
@@ -153,8 +172,8 @@ def ath_create_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
                 {
                     "ok": True,
                     "action": "reused",
-                    "listener": _handle_summary(existing, event_url=_event_url(config)),
-                    "secret": _secret_placeholder(existing),
+                    "listener": _handle_summary(existing, event_url=_event_url(config), secret_root=secret_root_from_config(config), ensure_secret_ref=True),
+                    "secret": _secret_reference(existing, event_url=_event_url(config), config=config),
                 }
             )
 
@@ -179,8 +198,8 @@ def ath_create_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
         {
             "ok": True,
             "action": "created",
-            "listener": _handle_summary(result.handle, event_url=result.event_url),
-            "secret": _secret_placeholder(result.handle),
+            "listener": _handle_summary(result.handle, event_url=result.event_url, secret_root=secret_root_from_config(config), ensure_secret_ref=True),
+            "secret": _secret_reference(result.handle, event_url=result.event_url, config=config),
         }
     )
 
@@ -200,7 +219,7 @@ def ath_list_listeners_tool(args: dict[str, Any], **kwargs: Any) -> str:
     return _json(
         {
             "ok": True,
-            "listeners": [_handle_summary(handle, event_url=_event_url(config)) for handle in listeners],
+            "listeners": [_handle_summary(handle, event_url=_event_url(config), secret_root=secret_root_from_config(config), ensure_secret_ref=False) for handle in listeners],
             "count": len(listeners),
         }
     )
@@ -214,11 +233,11 @@ def ath_get_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
     handle = _owned_handle(registry, str(args.get("thread_key") or ""), origin)
     if handle is None:
         return _json(_error("not_found", "async-thread listener not found"))
-    return _json({"ok": True, "listener": _handle_summary(handle, event_url=_event_url(config))})
+    return _json({"ok": True, "listener": _handle_summary(handle, event_url=_event_url(config), secret_root=secret_root_from_config(config), ensure_secret_ref=True)})
 
 
 def ath_retire_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
-    registry, _config = _registry_and_config(kwargs)
+    registry, config = _registry_and_config(kwargs)
     origin = _resolve_origin(kwargs)
     if not origin.ok:
         return _json(origin.public_error())
@@ -227,7 +246,31 @@ def ath_retire_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
     if handle is None:
         return _json(_error("not_found", "async-thread listener not found"))
     changed = registry.set_enabled(handle.thread_key, False)
-    return _json({"ok": changed, "threadKey": handle.thread_key, "enabled": False, "action": "retired"})
+    removed_secret_material = remove_secret_artifact(handle.thread_key, root=secret_root_from_config(config))
+    return _json({"ok": changed, "threadKey": handle.thread_key, "enabled": False, "action": "retired", "secretMaterialRemoved": removed_secret_material})
+
+
+def ath_rotate_listener_secret_tool(args: dict[str, Any], **kwargs: Any) -> str:
+    registry, config = _registry_and_config(kwargs)
+    origin = _resolve_origin(kwargs)
+    if not origin.ok:
+        return _json(origin.public_error())
+    thread_key = str(args.get("thread_key") or "")
+    handle = _owned_handle(registry, thread_key, origin)
+    if handle is None:
+        return _json(_error("not_found", "async-thread listener not found"))
+    rotated = registry.rotate_secret(handle.thread_key)
+    if rotated is None:
+        return _json(_error("not_found", "async-thread listener not found"))
+    event_url = _event_url(config)
+    return _json(
+        {
+            "ok": True,
+            "action": "rotated",
+            "listener": _handle_summary(rotated, event_url=event_url, secret_root=secret_root_from_config(config), ensure_secret_ref=True),
+            "secret": _secret_reference(rotated, event_url=event_url, config=config),
+        }
+    )
 
 
 def ath_trace_event_tool(args: dict[str, Any], **kwargs: Any) -> str:
@@ -368,8 +411,14 @@ def _same_origin(handle: AsyncThreadHandle, origin: OriginResolution) -> bool:
     )
 
 
-def _handle_summary(handle: AsyncThreadHandle, *, event_url: str = "") -> dict[str, Any]:
-    return {
+def _handle_summary(
+    handle: AsyncThreadHandle,
+    *,
+    event_url: str = "",
+    secret_root: Any | None = None,
+    ensure_secret_ref: bool = False,
+) -> dict[str, Any]:
+    summary = {
         "threadKey": handle.thread_key,
         "enabled": handle.enabled,
         "producerId": redact_metadata_text(handle.producer_id),
@@ -389,6 +438,13 @@ def _handle_summary(handle: AsyncThreadHandle, *, event_url: str = "") -> dict[s
         "sessionId": handle.session_id,
         "secretAvailable": bool(handle.secret),
     }
+    summary["secretRef"] = describe_secret_artifact(
+        handle,
+        event_url=event_url,
+        root=secret_root,
+        ensure=ensure_secret_ref,
+    )
+    return summary
 
 
 def _event_summary(event: Any) -> dict[str, Any]:
@@ -404,12 +460,15 @@ def _event_summary(event: Any) -> dict[str, Any]:
     }
 
 
-def _secret_placeholder(handle: AsyncThreadHandle) -> dict[str, Any]:
-    return {
-        "available": bool(handle.secret),
-        "returned": False,
-        "reason": "raw signing secrets are intentionally not returned by lifecycle tools; use the emitter/secret workflow once configured",
-    }
+def _secret_reference(handle: AsyncThreadHandle, *, event_url: str = "", config: Any | None = None) -> dict[str, Any]:
+    ref = describe_secret_artifact(
+        handle,
+        event_url=event_url,
+        root=secret_root_from_config(config),
+        ensure=True,
+    )
+    ref["reason"] = "raw signing secrets are intentionally not returned; pass ATH_SECRET_FILE to producer code"
+    return ref
 
 
 def _event_url(config: Any) -> str:

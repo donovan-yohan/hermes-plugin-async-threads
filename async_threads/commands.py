@@ -13,6 +13,7 @@ from .origin import remember_gateway_origin
 from .privacy import redact_metadata_text, redact_secret_text, safe_event_id
 from .registry import safe_session_key_hash
 from .routing import send_metadata_for_source
+from .secrets import describe_secret_artifact, remove_secret_artifact, secret_root_from_config
 from .workflows import WorkflowPolicy
 
 
@@ -26,6 +27,7 @@ commands:
   /ath workflows [thread_key] [--limit N]
   /ath inspect <thread_key>
   /ath emit-command <thread_key> --event event.type [--summary text]
+  /ath rotate-secret <thread_key>
   /ath lifecycle [thread_key]
   /ath prune [--dry-run|--force] [--event-log-days N] [--seen-days N]
   /ath pause <thread_key>
@@ -100,16 +102,18 @@ def _run_command(raw_args: str, *, event: Any, gateway: Any) -> str:
         return _cmd_inspect(registry, argv[1], owner_user_id=owner_user_id)
     if command == "emit-command" and len(argv) >= 2:
         return _cmd_emit_command(registry, argv[1], argv[2:], gateway=gateway, owner_user_id=owner_user_id)
+    if command in {"rotate-secret", "rotate_secret"} and len(argv) >= 2:
+        return _cmd_rotate_secret(registry, argv[1], config=config, gateway=gateway, owner_user_id=owner_user_id)
     if command == "lifecycle":
         return _cmd_lifecycle(registry, argv[1] if len(argv) >= 2 else "", owner_user_id=owner_user_id)
     if command == "prune":
         return _cmd_prune(registry, argv[1:], config=config, owner_user_id=owner_user_id)
     if command in {"pause", "disable"} and len(argv) >= 2:
-        return _cmd_set_enabled(registry, argv[1], False, "paused", owner_user_id=owner_user_id)
+        return _cmd_set_enabled(registry, argv[1], False, "paused", owner_user_id=owner_user_id, config=config)
     if command in {"resume", "enable"} and len(argv) >= 2:
-        return _cmd_set_enabled(registry, argv[1], True, "resumed", owner_user_id=owner_user_id)
+        return _cmd_set_enabled(registry, argv[1], True, "resumed", owner_user_id=owner_user_id, config=config)
     if command in {"retire", "revoke", "remove", "rm"} and len(argv) >= 2:
-        return _cmd_set_enabled(registry, argv[1], False, "retired" if command == "retire" else "revoked", owner_user_id=owner_user_id)
+        return _cmd_set_enabled(registry, argv[1], False, "retired" if command == "retire" else "revoked", owner_user_id=owner_user_id, config=config)
     return USAGE
 
 
@@ -188,6 +192,11 @@ def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> 
     except ListenValidationError as exc:
         return str(exc)
     handle = result.handle
+    secret_ref = describe_secret_artifact(
+        handle,
+        event_url=url,
+        root=secret_root_from_config(_platform_config(gateway)),
+    )
     events_text = ", ".join(handle.allowed_event_types) if handle.allowed_event_types else "all events"
     return (
         "created async-thread listener\n"
@@ -199,7 +208,9 @@ def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> 
         f"workflow gates: {_format_workflow_policy(handle.workflow_policy)}\n"
         f"events: {events_text}\n"
         f"url: `{url}`\n"
-        f"secret: `{handle.secret}`\n"
+        f"secretFile: `{secret_ref['secretFile']}`\n"
+        f"contractFile: `{secret_ref['contractFile']}`\n"
+        "raw secret is not printed; pass `ATH_SECRET_FILE` to producer code.\n"
         "sign request body with HMAC-SHA256 as `X-Hermes-Signature-256: sha256=<hex>`."
     )
 
@@ -365,6 +376,24 @@ def _cmd_emit_command(registry: Any, thread_key: str, args: list[str], *, gatewa
         "    print(f'Error: {err}')\n"
         "PY\n"
         "```"
+    )
+
+
+def _cmd_rotate_secret(registry: Any, thread_key: str, *, config: Any, gateway: Any, owner_user_id: str) -> str:
+    handle = registry.get_handle(thread_key)
+    if handle is None or not owner_user_id or handle.owner_user_id != owner_user_id:
+        return "async-thread listener not found."
+    rotated = registry.rotate_secret(thread_key)
+    if rotated is None:
+        return "async-thread listener not found."
+    url = _event_url(gateway)
+    secret_ref = describe_secret_artifact(rotated, event_url=url, root=secret_root_from_config(config))
+    return (
+        "rotated async-thread listener secret\n"
+        f"threadKey: `{rotated.thread_key}`\n"
+        f"secretFile: `{secret_ref['secretFile']}`\n"
+        f"contractFile: `{secret_ref['contractFile']}`\n"
+        "raw secret is not printed; update producer code to use the refreshed `ATH_SECRET_FILE`."
     )
 
 
@@ -655,12 +684,14 @@ def _cmd_inspect(registry: Any, thread_key: str, *, owner_user_id: str) -> str:
     )
 
 
-def _cmd_set_enabled(registry: Any, thread_key: str, enabled: bool, verb: str, *, owner_user_id: str) -> str:
+def _cmd_set_enabled(registry: Any, thread_key: str, enabled: bool, verb: str, *, owner_user_id: str, config: Any | None = None) -> str:
     h = registry.get_handle(thread_key)
     if h is None or not owner_user_id or h.owner_user_id != owner_user_id:
         return "async-thread listener not found."
     if not registry.set_enabled(thread_key, enabled):
         return "async-thread listener not found."
+    if not enabled and verb in {"retired", "revoked"}:
+        remove_secret_artifact(thread_key, root=secret_root_from_config(config))
     return f"{verb} async-thread listener `{thread_key}`."
 
 
