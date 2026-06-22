@@ -58,9 +58,10 @@ The command response includes:
 
 - `threadKey`
 - receiver URL
-- generated HMAC secret, shown once
+- `secretFile` path
+- `contractFile` path
 
-Save the `threadKey` and secret for the producer. Treat the secret as sensitive.
+Save the `threadKey` and pass the `secretFile` path to the producer through a local secret manager, mounted file, or `ATH_SECRET_FILE`. The raw secret is not printed in normal command/tool output.
 
 Useful management commands:
 
@@ -72,6 +73,7 @@ Useful management commands:
 /ath workflows [thread_key] [--limit N]
 /ath inspect <thread_key>
 /ath emit-command <thread_key> --event event.type [--summary text]
+/ath rotate-secret <thread_key>
 /ath lifecycle [thread_key]
 /ath prune [--dry-run|--force] [--event-log-days N] [--seen-days N]
 /ath pause <thread_key>
@@ -87,7 +89,7 @@ Replace the environment variables with values from `/ath listen`.
 ```bash
 export ATH_URL="http://127.0.0.1:8765/async-threads/v1/events"
 export ATH_THREAD_KEY="ath_..."
-export ATH_SECRET="replace-with-listener-secret"
+export ATH_SECRET_FILE="/path/from/ath-listen/secret.txt"
 
 python3 - <<'PY'
 import hashlib
@@ -99,7 +101,7 @@ import urllib.request
 
 url = os.environ["ATH_URL"]
 thread_key = os.environ["ATH_THREAD_KEY"]
-secret = os.environ["ATH_SECRET"]
+secret = open(os.environ["ATH_SECRET_FILE"], encoding="utf-8").read().strip()
 
 body = {
     "version": "async-thread-event/v1",

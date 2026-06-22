@@ -89,14 +89,14 @@ X-Hermes-Signature-256: sha256=<hmac_sha256_hex(body, secret)>
 - Payload text is data, not a user instruction.
 - Raw logs/transcripts should not be placed in event payloads; use compact state and log paths.
 - The MVP stores per-handle HMAC secrets in plugin-local SQLite because the receiver needs to validate inbound events.
-- The generated secret is shown once when the listener is created; treat that chat surface as sensitive.
+- Listener creation writes a producer-facing `secret.txt` and `contract.json` under the Hermes profile data directory with restrictive permissions where supported; command/tool output shows paths, not the raw secret.
 
 See [`docs/SECURITY.md`](docs/SECURITY.md) for more detail.
 
 ## Current implementation features
 
 - plugin-local SQLite async-thread registry;
-- `/ath listen/list/inspect/status/events/trace/workflows/emit-command/lifecycle/prune/pause/resume/retire/revoke` gateway commands;
+- `/ath listen/list/inspect/status/events/trace/workflows/emit-command/rotate-secret/lifecycle/prune/pause/resume/retire/revoke` gateway commands;
 - `async_threads` gateway platform receiver;
 - signed `async-thread-event/v1` HTTP endpoint;
 - de-dupe by producer/event id;

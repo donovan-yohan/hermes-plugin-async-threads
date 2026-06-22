@@ -484,6 +484,17 @@ class AsyncThreadRegistry:
             )
             return cur.rowcount > 0
 
+    def rotate_secret(self, thread_key: str) -> AsyncThreadHandle | None:
+        new_secret = secrets.token_urlsafe(32)
+        with self._connect() as conn:
+            cur = conn.execute(
+                "update async_thread_handles set secret = ?, updated_at = ? where thread_key = ?",
+                (new_secret, utc_now(), thread_key),
+            )
+            if cur.rowcount == 0:
+                return None
+        return self.get_handle(thread_key)
+
     def revoke(self, thread_key: str) -> bool:
         return self.set_enabled(thread_key, False)
 

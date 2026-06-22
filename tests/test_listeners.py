@@ -68,7 +68,10 @@ class FakeRequest:
 
 def _gateway(registry_path):
     async_adapter = SimpleNamespace(
-        config=PlatformConfig(enabled=True, extra={"registry_path": str(registry_path), "host": "127.0.0.1", "port": 9999})
+        config=PlatformConfig(
+            enabled=True,
+            extra={"registry_path": str(registry_path), "host": "127.0.0.1", "port": 9999, "secret_root": str(registry_path.parent / "secrets")},
+        )
     )
     return SimpleNamespace(
         adapters={PluginPlatform(): async_adapter},
@@ -213,7 +216,10 @@ def test_slash_listen_uses_shared_listener_service(monkeypatch, tmp_path):
     assert captured["debounce_seconds"] == "30"
     assert captured["gate_order"] == ["review"]
     assert "created async-thread listener" in output
-    assert "secret: `fake-secret`" in output
+    assert "secretFile:" in output
+    assert "contractFile:" in output
+    assert "raw secret is not printed" in output
+    assert "fake-secret" not in output
 
 
 @pytest.mark.asyncio
