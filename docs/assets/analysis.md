@@ -23,11 +23,11 @@ Explain the current async-threads MVP at a glance without making users learn `/a
 5. The registry resolves `threadKey` to the stored origin session, then policy chooses direct notification or `agent_queue` continuation metadata.
 6. The event returns to the same mapped gateway conversation, with payload boxed as untrusted data.
 
-## Existing image notes
+## Previous image notes
 
-The existing `baoyu-async-thread-flow.png` uses the desired dark technical vector style: deep navy background, violet cards, cyan arrows, amber active route, and a red untrusted-data boundary. It is readable and consistent with the banner.
+The pre-regeneration `baoyu-async-thread-flow.png` used the desired dark technical vector style: deep navy background, violet cards, cyan arrows, amber active route, and a red untrusted-data boundary. It was readable and consistent with the banner.
 
-However it begins with "Producer event" and centers the technical receiver path. That is now slightly stale after the docs audit: the public story should start with a normal user asking Hermes to watch work, then show Hermes using model-facing ATH tools and producing a safe handoff. `/ath` should be absent or clearly not the primary path.
+However it began with "Producer event" and centered the technical receiver path. That became stale after the docs audit: the public story should start with a normal user asking Hermes to watch work, then show Hermes using model-facing ATH tools and producing a safe handoff. `/ath` should be absent or clearly not the primary path.
 
 ## Regeneration target
 
