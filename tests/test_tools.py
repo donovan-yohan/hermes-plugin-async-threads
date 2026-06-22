@@ -195,6 +195,26 @@ def test_create_listener_tool_creates_current_origin_listener_without_secret(tmp
         assert oct(os.stat(secret_file).st_mode & 0o777) == "0o600"
 
 
+def test_create_listener_tool_uses_public_url_for_model_output(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    kwargs = _tool_kwargs(registry, tmp_path)
+    kwargs["config"] = PlatformConfig(
+        enabled=True,
+        extra={
+            "registry_path": str(tmp_path / "ath.sqlite3"),
+            "host": "127.0.0.1",
+            "port": 9999,
+            "public_url": "https://ath.example.test/base/",
+            "secret_root": str(tmp_path / "secrets"),
+        },
+    )
+
+    result = _loads(ath_create_listener_tool({"purpose": "watch build", "producer_hint": "demo-ci"}, **kwargs))
+
+    assert result["listener"]["eventUrl"] == "https://ath.example.test/base/async-threads/v1/events"
+    assert json.load(open(result["secret"]["contractFile"], encoding="utf-8"))["eventUrl"] == "https://ath.example.test/base/async-threads/v1/events"
+
+
 def test_create_listener_tool_reuses_equivalent_active_listener(tmp_path):
     registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
     args = {"purpose": "watch build", "producer_hint": "demo-ci", "event_kinds": ["finished", "failed"]}
@@ -206,6 +226,39 @@ def test_create_listener_tool_reuses_equivalent_active_listener(tmp_path):
     assert second["ok"] is True
     assert first["listener"]["threadKey"] == second["listener"]["threadKey"]
     assert second["action"] == "reused"
+    assert len(registry.list_handles(owner_user_id="user-1")) == 1
+
+
+def test_create_listener_tool_does_not_reuse_when_delivery_or_ack_differs(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    base = {"purpose": "watch build", "producer_hint": "demo-ci", "event_kinds": ["finished", "failed"]}
+
+    queued = _loads(ath_create_listener_tool({**base, "delivery": "agent_queue", "ack": "brief"}, **_tool_kwargs(registry, tmp_path)))
+    direct = _loads(ath_create_listener_tool({**base, "delivery": "direct"}, **_tool_kwargs(registry, tmp_path)))
+    debug = _loads(ath_create_listener_tool({**base, "delivery": "agent_queue", "ack": "debug"}, **_tool_kwargs(registry, tmp_path)))
+
+    assert queued["action"] == "created"
+    assert direct["action"] == "created"
+    assert debug["action"] == "created"
+    assert queued["listener"]["threadKey"] != direct["listener"]["threadKey"]
+    assert queued["listener"]["threadKey"] != debug["listener"]["threadKey"]
+    assert direct["listener"]["policy"] == "direct"
+    assert direct["listener"]["ackMode"] == "none"
+    assert debug["listener"]["ackMode"] == "debug"
+    assert len(registry.list_handles(owner_user_id="user-1")) == 3
+
+
+def test_create_listener_tool_reuses_direct_listener_with_equivalent_normalized_ack(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    args = {"purpose": "watch build", "producer_hint": "demo-ci", "event_kinds": ["finished"], "delivery": "direct"}
+
+    first = _loads(ath_create_listener_tool({**args, "ack": "brief"}, **_tool_kwargs(registry, tmp_path)))
+    second = _loads(ath_create_listener_tool({**args, "ack": "debug"}, **_tool_kwargs(registry, tmp_path)))
+
+    assert first["action"] == "created"
+    assert second["action"] == "reused"
+    assert first["listener"]["threadKey"] == second["listener"]["threadKey"]
+    assert second["listener"]["ackMode"] == "none"
     assert len(registry.list_handles(owner_user_id="user-1")) == 1
 
 
