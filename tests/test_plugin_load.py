@@ -12,6 +12,7 @@ class FakePluginContext:
         self.platforms = []
         self.hooks = []
         self.commands = []
+        self.tools = []
 
     def register_platform(self, **kwargs):
         self.platforms.append(kwargs)
@@ -21,6 +22,9 @@ class FakePluginContext:
 
     def register_command(self, name, handler, **kwargs):
         self.commands.append((name, handler, kwargs))
+
+    def register_tool(self, **kwargs):
+        self.tools.append(kwargs)
 
 
 def _load_root_plugin():
@@ -77,3 +81,11 @@ def test_root_plugin_registers_platform_hook_and_command():
     assert [(name, kwargs["description"]) for name, _handler, kwargs in ctx.commands] == [
         ("ath", "Manage async-thread listeners")
     ]
+    assert {tool["name"] for tool in ctx.tools} == {
+        "ath_create_listener",
+        "ath_list_listeners",
+        "ath_get_listener",
+        "ath_retire_listener",
+        "ath_trace_event",
+    }
+    assert {tool["toolset"] for tool in ctx.tools} == {"plugin_async_threads"}
