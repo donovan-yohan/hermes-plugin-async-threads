@@ -337,7 +337,7 @@ def ath_generate_producer_handoff_tool(args: dict[str, Any], **kwargs: Any) -> s
     if not isinstance(include_sensitive_secret_value, bool):
         return _json(_error("invalid_request", "include_sensitive_secret must be a boolean"))
     create_files = create_files_value
-    include_sensitive_secret = include_sensitive_secret_value is True
+    include_sensitive_secret = include_sensitive_secret_value
     sensitive_allowed = mode.strip().lower().replace("-", "_") in {"debug_curl", "debug", "curl"}
     if include_sensitive_secret and not sensitive_allowed:
         return _json(_error("invalid_request", "include_sensitive_secret is only allowed with debug_curl mode"))
