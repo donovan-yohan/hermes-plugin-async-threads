@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 from .adapter import registry_from_config, registry_path_from_config
+from .listeners import ListenValidationError, create_listener
 from .privacy import redact_metadata_text, redact_secret_text, safe_event_id
 from .registry import safe_session_key_hash
 from .routing import send_metadata_for_source
@@ -118,7 +119,7 @@ def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> 
     label = ""
     policy = "agent_queue"
     ack_mode = "none"
-    debounce_seconds = 0
+    debounce_seconds: int | str = 0
     gate_order: list[str] = []
     gate_mode = "serial"
     stale_on_artifact_change: list[str] = []
@@ -143,10 +144,7 @@ def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> 
             i += 2
             continue
         if arg == "--debounce" and i + 1 < len(args):
-            try:
-                debounce_seconds = int(args[i + 1])
-            except ValueError:
-                return "invalid debounce seconds. use 0-300."
+            debounce_seconds = args[i + 1]
             i += 2
             continue
         if arg == "--gate-order" and i + 1 < len(args):
@@ -167,43 +165,27 @@ def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> 
             continue
         return f"unknown option for /ath listen: {arg}"
 
-    if ack_mode not in {"none", "brief", "debug"}:
-        return "invalid ack mode. use one of: none, brief, debug."
-    if policy == "direct" and ack_mode != "none":
-        ack_mode = "none"
-    if debounce_seconds < 0 or debounce_seconds > 300:
-        return "invalid debounce seconds. use 0-300."
-    if gate_mode not in {"serial", "parallel"}:
-        return "invalid gate mode. use one of: serial, parallel."
-    if policy == "direct":
-        debounce_seconds = 0
-    workflow_policy = WorkflowPolicy.from_mapping(
-        {
-            "gate_order": gate_order,
-            "gate_mode": gate_mode,
-            "stale_on_artifact_change": stale_on_artifact_change,
-            "candidate_required": candidate_required,
-        }
-    )
-
-    source = event.source
-    source_dict = source.to_dict() if hasattr(source, "to_dict") else dict(source)
-    session_key = _session_key_for_source(gateway, source)
-    session_id = _session_id_for_key(gateway, session_key)
-    handle = registry.create_handle(
-        source=source_dict,
-        producer_id=producer_id,
-        label=label,
-        allowed_event_types=events,
-        policy=policy,
-        session_key=session_key,
-        session_id=session_id,
-        owner_user_id=str(getattr(source, "user_id", "") or ""),
-        ack_mode=ack_mode,
-        debounce_seconds=debounce_seconds,
-        workflow_policy=workflow_policy,
-    )
     url = _event_url(gateway)
+    try:
+        result = create_listener(
+            registry=registry,
+            source=event.source,
+            gateway=gateway,
+            producer_id=producer_id,
+            label=label,
+            allowed_event_types=events,
+            policy=policy,
+            ack_mode=ack_mode,
+            debounce_seconds=debounce_seconds,
+            gate_order=gate_order,
+            gate_mode=gate_mode,
+            stale_on_artifact_change=stale_on_artifact_change,
+            candidate_required=candidate_required,
+            event_url=url,
+        )
+    except ListenValidationError as exc:
+        return str(exc)
+    handle = result.handle
     events_text = ", ".join(handle.allowed_event_types) if handle.allowed_event_types else "all events"
     return (
         "created async-thread listener\n"
@@ -719,29 +701,6 @@ def _platform_config(gateway: Any) -> Any:
     if PlatformConfig is None:
         raise RuntimeError("gateway PlatformConfig unavailable")
     return PlatformConfig(enabled=True, extra={})
-
-
-def _session_key_for_source(gateway: Any, source: Any) -> str:
-    from gateway.session import build_session_key
-
-    return build_session_key(
-        source,
-        group_sessions_per_user=getattr(gateway.config, "group_sessions_per_user", True),
-        thread_sessions_per_user=getattr(gateway.config, "thread_sessions_per_user", False),
-    )
-
-
-def _session_id_for_key(gateway: Any, session_key: str) -> str:
-    store = getattr(gateway, "session_store", None)
-    if store is None:
-        return ""
-    try:
-        entry = store.get_session_by_key(session_key)
-    except Exception:
-        entry = None
-    if entry is None:
-        return ""
-    return str(getattr(entry, "session_id", "") or "")
 
 
 def _event_url(gateway: Any) -> str:
