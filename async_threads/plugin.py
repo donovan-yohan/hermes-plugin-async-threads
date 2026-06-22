@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .adapter import AsyncThreadsAdapter, check_requirements, validate_config
 from .commands import ath_help, handle_pre_gateway_dispatch
+from .tools import register_tools
 
 
 def register(ctx) -> None:
@@ -18,6 +19,7 @@ def register(ctx) -> None:
         allow_update_command=False,
     )
     ctx.register_hook("pre_gateway_dispatch", handle_pre_gateway_dispatch)
+    register_tools(ctx)
     # This is mostly for command discoverability in CLI/help surfaces. The real
     # gateway implementation intercepts /ath in pre_gateway_dispatch so it can
     # capture event.source for "listen here".
