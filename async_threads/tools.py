@@ -235,7 +235,8 @@ def ath_get_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
     handle = _owned_handle(registry, str(args.get("thread_key") or ""), origin)
     if handle is None:
         return _json(_error("not_found", "async-thread listener not found"))
-    return _json({"ok": True, "listener": _handle_summary(handle, event_url=_event_url(config), secret_root=secret_root_from_config(config), ensure_secret_ref=True)})
+    ensure_secret_ref = bool(handle.enabled)
+    return _json({"ok": True, "listener": _handle_summary(handle, event_url=_event_url(config), secret_root=secret_root_from_config(config), ensure_secret_ref=ensure_secret_ref)})
 
 
 def ath_retire_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
@@ -261,6 +262,8 @@ def ath_rotate_listener_secret_tool(args: dict[str, Any], **kwargs: Any) -> str:
     handle = _owned_handle(registry, thread_key, origin)
     if handle is None:
         return _json(_error("not_found", "async-thread listener not found"))
+    if not handle.enabled:
+        return _json(_error("listener_disabled", "async-thread listener is disabled; resume before rotating secret"))
     rotated = registry.rotate_secret(handle.thread_key)
     if rotated is None:
         return _json(_error("not_found", "async-thread listener not found"))
@@ -452,7 +455,7 @@ def _handle_summary(
         handle,
         event_url=event_url,
         root=secret_root,
-        ensure=ensure_secret_ref,
+        ensure=ensure_secret_ref and bool(handle.enabled),
     )
     return summary
 

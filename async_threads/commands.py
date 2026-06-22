@@ -383,6 +383,8 @@ def _cmd_rotate_secret(registry: Any, thread_key: str, *, config: Any, gateway: 
     handle = registry.get_handle(thread_key)
     if handle is None or not owner_user_id or handle.owner_user_id != owner_user_id:
         return "async-thread listener not found."
+    if not handle.enabled:
+        return "async-thread listener is disabled; resume before rotating secret."
     rotated = registry.rotate_secret(thread_key)
     if rotated is None:
         return "async-thread listener not found."

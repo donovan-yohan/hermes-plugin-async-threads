@@ -44,9 +44,9 @@ class ListenRequest:
 class ListenResult:
     """Structured result from listener creation.
 
-    `handle.secret` remains available for the existing power-user slash command,
-    but callers that render user-facing output should prefer `public_summary()`
-    unless they are in an explicit sensitive/admin path.
+    The registry handle still contains the receiver-side secret so inbound events
+    can be validated. Callers that render user-facing output should prefer
+    `public_summary()` or secret-file references instead of literal secret values.
     """
 
     handle: AsyncThreadHandle

@@ -61,7 +61,7 @@ The command response includes:
 - `secretFile` path
 - `contractFile` path
 
-Save the `threadKey` and pass the `secretFile` path to the producer through a local secret manager, mounted file, or `ATH_SECRET_FILE`. The raw secret is not printed in normal command/tool output.
+Save the `threadKey` and pass the `secretFile` path to the producer through a local secret manager, mounted file, or `ATH_SECRET_FILE`. The generated `secret.txt` is written without a trailing newline, so producer examples read the file text directly. The raw secret is not printed in normal command/tool output.
 
 Useful management commands:
 
@@ -101,7 +101,7 @@ import urllib.request
 
 url = os.environ["ATH_URL"]
 thread_key = os.environ["ATH_THREAD_KEY"]
-secret = open(os.environ["ATH_SECRET_FILE"], encoding="utf-8").read().strip()
+secret = open(os.environ["ATH_SECRET_FILE"], encoding="utf-8").read()
 
 body = {
     "version": "async-thread-event/v1",

@@ -122,8 +122,8 @@ class AsyncThreadRegistry:
     """Durable listener registry.
 
     The DB intentionally stores producer secrets for the MVP because the event
-    receiver needs to validate per-handle HMAC signatures. Command surfaces only
-    reveal the generated secret at creation time.
+    receiver needs to validate per-handle HMAC signatures. Command and model-tool
+    surfaces expose secret-file references only, not literal secret values.
     """
 
     def __init__(self, path: str | Path):
