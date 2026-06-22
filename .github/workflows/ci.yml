@@ -24,7 +24,7 @@ jobs:
         run: uv lock --check
 
       - name: Gateway-free tests
-        run: uv run --extra test pytest -q --confcutdir=tests --rootdir=tests tests/test_security.py tests/test_profile_lane.py tests/test_registry.py
+        run: uv run --extra test pytest -q --confcutdir=tests --rootdir=tests tests/test_security.py tests/test_profile_lane.py tests/test_registry.py tests/test_docs_agent_first.py
 
       - name: Build wheel and source distribution
         run: uv build
@@ -81,6 +81,7 @@ jobs:
               Path('docs/SECURITY.md'),
               Path('docs/EVENT_CONTRACT.md'),
               Path('docs/AGENT_TOOL_SCENARIOS.md'),
+              Path('skills/async-thread-agent-tools/SKILL.md'),
               Path('docs/design/STABLE_CONTINUATION_API.md'),
           ]
           banned = re.compile(r'\b(typeline|kanban|\bebi\b|wc-typeline|ultracode)\b', re.I)

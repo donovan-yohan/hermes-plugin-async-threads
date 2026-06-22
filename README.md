@@ -42,18 +42,32 @@ Good fits:
 
 The diagram above is intentionally scoped to the current MVP: gateway-local dispatch, dispatch paths covered with mock adapter tests, and producer payload boxed as untrusted data.
 
-1. A user creates a listener from an existing Hermes gateway conversation with `/ath listen`.
-2. The plugin stores a durable `threadKey`, the captured Hermes `SessionSource`, allowed producer/event scope, policy, and a per-handle HMAC secret.
-3. A producer sends `async-thread-event/v1` JSON to `POST /async-threads/v1/events` and signs the exact request body.
-4. The receiver validates timestamp, route scope, HMAC, and de-dupe state.
-5. Policy chooses either direct delivery or `agent_queue` continuation.
-6. Event summary, subject, and payload are rendered as untrusted data before entering the agent session.
+1. A user asks Hermes from an existing gateway conversation to watch/report on long-running work.
+2. Hermes uses the model-facing ATH tools to create or reuse a listener and generate a safe producer handoff. Power users can do the same setup manually with `/ath listen`.
+3. The plugin stores a durable `threadKey`, the captured Hermes `SessionSource`, allowed producer/event scope, policy, and a per-handle HMAC secret.
+4. A producer sends `async-thread-event/v1` JSON to `POST /async-threads/v1/events` and signs the exact request body.
+5. The receiver validates timestamp, route scope, HMAC, and de-dupe state.
+6. Policy chooses either direct delivery or `agent_queue` continuation.
+7. Event summary, subject, and payload are rendered as untrusted data before entering the agent session.
 
 ## Quickstart
 
-See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for install/config and a complete signed demo event. See [`docs/EVENT_CONTRACT.md`](docs/EVENT_CONTRACT.md) for the producer-facing event contract and JSON Schema. See [`docs/BRIDGE_RECIPES.md`](docs/BRIDGE_RECIPES.md) for task-board bridge, emit-command, lifecycle, supersession, trace, and prune recipes.
+See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for install/config and a complete agent-first signed demo workflow. See [`docs/EVENT_CONTRACT.md`](docs/EVENT_CONTRACT.md) for the producer-facing event contract and JSON Schema. See [`docs/BRIDGE_RECIPES.md`](docs/BRIDGE_RECIPES.md) for task-board bridge, emit-command, lifecycle, supersession, trace, and prune recipes. See [`skills/async-thread-agent-tools/SKILL.md`](skills/async-thread-agent-tools/SKILL.md) for the reusable Hermes agent skill.
 
-Minimal listener example from a supported Hermes gateway conversation:
+Normal user ask:
+
+```text
+watch this demo job and report back here when it finishes
+```
+
+Expected agent path:
+
+1. call `ath_create_listener` for the current conversation;
+2. call `ath_generate_producer_handoff` for the producer;
+3. give the producer `ATH_SECRET_FILE`/contract paths, not the raw secret;
+4. verify the signed event with `ath_trace_event` or `/ath trace`.
+
+Manual `/ath listen` remains available for power users and debugging:
 
 ```text
 /ath listen demo --events demo.job.finished --ack brief
@@ -96,7 +110,8 @@ See [`docs/SECURITY.md`](docs/SECURITY.md) for more detail.
 ## Current implementation features
 
 - plugin-local SQLite async-thread registry;
-- `/ath listen/list/inspect/status/events/trace/workflows/emit-command/rotate-secret/lifecycle/prune/pause/resume/retire/revoke` gateway commands;
+- model-facing tools for listener creation, inspection, retirement, tracing, and producer handoff generation;
+- `/ath listen/list/inspect/status/events/trace/workflows/emit-command/rotate-secret/lifecycle/prune/pause/resume/retire/revoke` gateway commands for manual admin/debug;
 - `async_threads` gateway platform receiver;
 - signed `async-thread-event/v1` HTTP endpoint;
 - de-dupe by producer/event id;
@@ -117,7 +132,7 @@ See [`docs/SECURITY.md`](docs/SECURITY.md) for more detail.
 - Non-Discord routing has unit coverage for shared send metadata, Telegram DM/topic metadata, and Slack-style generic thread metadata; live gateway smokes are still pending.
 - Direct delivery, acknowledgement, and command notices share a centralized send-metadata helper, but the helper still wraps a private Hermes gateway function until the [stable continuation API](docs/design/STABLE_CONTINUATION_API.md) lands.
 - Active-session queueing currently relies on Hermes gateway/adapter internals; the continuation API spike names the smallest core seam to remove that coupling.
-- CLI and Hermes Desktop cannot create a listener from “here” yet.
+- CLI and Hermes Desktop cannot create a listener from “here” yet; listener creation needs a live gateway origin, and no-source contexts fail closed.
 
 ## Development
 

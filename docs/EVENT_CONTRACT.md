@@ -50,9 +50,9 @@ Do not reformat the JSON after signing. Even a whitespace or key-order change ch
 | `version` | string | Must be exactly `async-thread-event/v1`. |
 | `eventId` | string | Stable id from the producer. The same producer must reuse the same id when retrying the same event. Keep it non-secret and under 200 characters. |
 | `eventType` | string | Producer-defined event type, for example `ci.build.finished`. Keep it non-secret and under 200 characters. Listener allowlists match this exact string. |
-| `producer.id` | string | Stable producer id that matches the `/ath listen <producer>` handle. Keep it non-secret and under 200 characters. |
+| `producer.id` | string | Stable producer id that matches the listener handle, for example the `producer_hint` used with `ath_create_listener`. Keep it non-secret and under 200 characters. |
 | `occurredAt` | ISO-8601 string, epoch seconds string, or number | Event timestamp. The receiver rejects events outside the replay window, currently defaulting to 5 minutes. |
-| `asyncThread.threadKey` | string | Thread key returned by `/ath listen`, for example `ath_...`. |
+| `asyncThread.threadKey` | string | Thread key returned by `ath_create_listener`, `ath_generate_producer_handoff`, or manual `/ath listen`, for example `ath_...`. |
 
 ## Recommended fields
 
