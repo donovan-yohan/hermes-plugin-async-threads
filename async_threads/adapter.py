@@ -379,6 +379,13 @@ def _build_adapter_base():
                 return "direct_delivered", detail
 
             safe_message_id = safe_event_id(fields["event_id"])
+            continuation_summary = handle.continuation_policy.public_summary(core_enforced=False)
+            detail["continuation_policy"] = continuation_summary
+            detail["continuation_core_enforced"] = False
+            if handle.continuation_policy.fail_closed_without_core_bounds:
+                detail["continuation_fail_closed"] = True
+                detail["continuation_limit_reason"] = "core_bounds_unavailable"
+                raise DispatchEventError("bounded continuation unavailable", detail=detail)
             event = MessageEvent(
                 text=text,
                 message_type=MessageType.TEXT,
@@ -389,6 +396,8 @@ def _build_adapter_base():
                     "eventType": redact_metadata_text(fields["event_type"]),
                     "producerId": redact_metadata_text(fields["producer_id"]),
                     "threadKey": handle.thread_key,
+                    "continuationPolicy": continuation_summary,
+                    "continuationPolicyCoreEnforced": False,
                 },
                 message_id=safe_message_id,
                 internal=True,
