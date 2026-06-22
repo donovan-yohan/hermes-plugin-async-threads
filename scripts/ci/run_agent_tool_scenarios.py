@@ -307,7 +307,7 @@ async def scenario_pr_review_lane(h: Harness) -> ScenarioResult:
     result.check("prompt_injection_boundary", "not a direct user instruction" in event.text and "untrusted data" in event.text, event.text.splitlines()[:8])
     result.check("secret_redaction_rendered_message", not _contains_any_secret(event.text), event.text)
     result.check(
-        "bounded_continuation_policy",
+        "continuation_policy_metadata",
         event.raw_message.get("continuationPolicy", {}).get("maxTurns") == 1
         and event.raw_message.get("continuationPolicy", {}).get("maxToolCalls") == 0
         and event.raw_message.get("continuationPolicyCoreEnforced") is False,
@@ -349,6 +349,8 @@ async def scenario_local_long_job_coalescing(h: Harness) -> ScenarioResult:
     coalesced_texts = [event.text for event in h.target.handled if "async_threads.coalesced" in event.text]
     terminal_texts = [event.text for event in h.target.handled if "local-job.finished" in event.text]
     result.check("coalescing_digest_evidence", bool(coalesced_texts) and "2 async-thread routine events coalesced" in coalesced_texts[-1], coalesced_texts[-1] if coalesced_texts else "")
+    routine_message_ids = [getattr(event, "message_id", "") for event in h.target.handled if getattr(event, "message_id", "") in {"bench-job-started", "bench-job-progress"}]
+    result.check("routine_events_not_individually_delivered", not routine_message_ids, routine_message_ids)
     result.check("terminal_not_swallowed_by_coalescing", bool(terminal_texts), terminal_texts[-1] if terminal_texts else "")
     outcomes = [event.outcome for event in h.registry.list_recent_events(thread_key=handle.thread_key, limit=10)]
     result.check("event_log_records_coalescing_and_terminal", "coalesced_pending" in outcomes and "agent_started" in outcomes, outcomes)
@@ -379,23 +381,25 @@ async def scenario_external_producer_handoff(h: Harness) -> ScenarioResult:
     result.check("secret_file_exact_text", secret_file.read_text(encoding="utf-8") == handle.secret, {"secretFile": str(secret_file)})
     body = _event_body(handle, event_id="bench-external-finished", event_type="external-ci.finished", summary="external job done", payload={"status": "passed"})
     delivered = await h.adapter._handle_event(FakeRequest(body, handle.secret))
+    sent_after_delivery = len(h.target.sent)
     duplicate = await h.adapter._handle_event(FakeRequest(body, handle.secret))
     result.check("signature_validation", verify_hmac_signature(body, handle.secret, FakeRequest(body, handle.secret).headers["X-Hermes-Signature-256"]))
-    result.check("direct_delivery_policy", delivered.status == 200 and _response_json(delivered).get("status") == "delivered" and len(h.target.sent) >= 1, {"status": delivered.status, "sent": len(h.target.sent)})
-    result.check("dedupe_replay_protection", duplicate.status == 200 and _response_json(duplicate).get("status") == "duplicate" and len(h.target.sent) >= 1)
+    result.check("direct_delivery_policy", delivered.status == 200 and _response_json(delivered).get("status") == "delivered" and sent_after_delivery == 1, {"status": delivered.status, "sent": sent_after_delivery})
+    result.check("dedupe_replay_protection", duplicate.status == 200 and _response_json(duplicate).get("status") == "duplicate" and len(h.target.sent) == sent_after_delivery, {"sentAfterDelivery": sent_after_delivery, "sentAfterDuplicate": len(h.target.sent)})
     result.check("secret_redaction_diagnostics", not _contains_any_secret(ath_trace_event_tool({"event_id": "bench-external-finished"}, **h.kwargs())))
     return result
 
 
 async def scenario_debug_admin_lifecycle(h: Harness) -> ScenarioResult:
     result = ScenarioResult("debug_admin", "Debug/admin")
+    before_no_source_count = len(h.registry.list_handles())
     no_source = _loads(
         ath_create_listener_tool(
             {"purpose": "watch from cli", "producer_hint": "cli-job"},
             **h.kwargs(store=FakeStore(), session_id="missing-cli-session"),
         )
     )
-    before_count = len(h.registry.list_handles())
+    after_no_source_count = len(h.registry.list_handles())
     created = _loads(
         ath_create_listener_tool(
             {"purpose": "inspect lifecycle", "producer_hint": "admin-demo", "event_kinds": ["finished"]},
@@ -404,7 +408,8 @@ async def scenario_debug_admin_lifecycle(h: Harness) -> ScenarioResult:
     )
     handle = h.registry.get_handle(created.get("listener", {}).get("threadKey", ""))
     result.check("no_source_fails_closed", no_source.get("ok") is False and no_source.get("error") == "source_unavailable", no_source)
-    result.check("no_source_does_not_guess_home_channel", len(h.registry.list_handles()) == before_count + 1, {"before": before_count, "after": len(h.registry.list_handles())})
+    result.check("no_source_does_not_guess_home_channel", after_no_source_count == before_no_source_count, {"before": before_no_source_count, "afterNoSource": after_no_source_count})
+    result.check("valid_source_creates_exactly_one_listener", len(h.registry.list_handles()) == after_no_source_count + 1, {"beforeValidSource": after_no_source_count, "afterValidSource": len(h.registry.list_handles())})
     if handle is None:
         result.check("lifecycle_cleanup_retirement", False, "missing handle")
         return result

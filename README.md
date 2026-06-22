@@ -4,7 +4,7 @@
 
 > Event-driven wakeups for existing Hermes gateway conversations, without cron polling.
 
-`hermes-plugin-async-threads` lets an external producer send a signed event to Hermes and target an existing conversation handle. Hermes validates the event, de-dupes it, resolves the registered async-thread handle, and either posts a direct notification or queues a bounded continuation into the same gateway session.
+`hermes-plugin-async-threads` lets an external producer send a signed event to Hermes and target an existing conversation handle. Hermes validates the event, de-dupes it, resolves the registered async-thread handle, and either posts a direct notification or queues an agent continuation with explicit policy metadata for the same gateway session. Current Hermes core does not expose plugin-local hard caps for those continuation limits, so strict hard-bound requirements should opt into fail-closed mode until that core seam exists.
 
 ## Current status
 
