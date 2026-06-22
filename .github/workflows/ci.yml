@@ -80,6 +80,7 @@ jobs:
               Path('docs/QUICKSTART.md'),
               Path('docs/SECURITY.md'),
               Path('docs/EVENT_CONTRACT.md'),
+              Path('docs/AGENT_TOOL_SCENARIOS.md'),
               Path('docs/design/STABLE_CONTINUATION_API.md'),
           ]
           banned = re.compile(r'\b(typeline|kanban|\bebi\b|wc-typeline|ultracode)\b', re.I)
@@ -121,6 +122,11 @@ jobs:
         env:
           HERMES_AGENT_PATH: ${{ github.workspace }}/.hermes-agent
         run: uv run --extra test pytest -q
+
+      - name: Agent-tool scenario harness
+        env:
+          HERMES_AGENT_PATH: ${{ github.workspace }}/.hermes-agent
+        run: uv run --extra test python scripts/ci/run_agent_tool_scenarios.py
 
       - name: Built wheel plugin entry point loads with Hermes checkout
         env:
