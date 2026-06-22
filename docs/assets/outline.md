@@ -17,8 +17,8 @@ image_count: 2
 
 ## Illustration 2
 **Position**: README "How it works" section.
-**Purpose**: Explain the gateway-local MVP flow at a glance.
-**Visual Content**: Producer event → HMAC/replay/de-dupe validation → async-thread registry resolves threadKey → policy chooses direct or agent_queue → same Hermes gateway conversation. Include explicit untrusted payload boundary and gateway-local/Discord-tested caveat.
+**Purpose**: Explain the agent-first gateway-local MVP flow at a glance.
+**Visual Content**: User asks Hermes → model-facing ATH tools create/reuse listener → safe producer handoff with contract/secret-file path → producer sends signed event → receiver validates/de-dupes → registry and policy route direct or agent_queue continuation metadata → same mapped gateway conversation. Include explicit untrusted payload boundary, gateway-local caveat, and `/ath` as admin/debug note.
 **Filename**: baoyu-async-thread-flow.png
 **Type**: Baoyu infographic / flowchart
 **Aspect**: 16:9 landscape

@@ -38,7 +38,7 @@ Good fits:
 
 ## How it works
 
-![Baoyu infographic showing producer event validation, registry lookup, policy routing, and same gateway conversation delivery](docs/assets/baoyu-async-thread-flow.png)
+![Baoyu infographic showing an agent-first ATH workflow: user ask, model-facing tools, safe producer handoff, signed event validation, registry policy routing, and same gateway conversation delivery](docs/assets/baoyu-async-thread-flow.png)
 
 The diagram above is intentionally scoped to the current MVP: gateway-local dispatch, dispatch paths covered with mock adapter tests, and producer payload boxed as untrusted data.
 
