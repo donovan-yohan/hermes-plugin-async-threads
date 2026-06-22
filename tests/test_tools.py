@@ -189,7 +189,7 @@ def test_create_listener_tool_creates_current_origin_listener_without_secret(tmp
     assert listener["secretRef"]["secretFile"] == secret_file
     assert str(tmp_path / "secrets") in secret_file
     assert "/hermes-plugin-async-threads" not in secret_file
-    assert open(secret_file, encoding="utf-8").read().strip() == handle.secret
+    assert open(secret_file, encoding="utf-8").read() == handle.secret
     assert json.load(open(contract_file, encoding="utf-8"))["secretFile"] == secret_file
     if os.name == "posix":
         assert oct(os.stat(secret_file).st_mode & 0o777) == "0o600"
@@ -308,7 +308,7 @@ def test_list_inspect_and_retire_are_owner_scoped_and_hide_secret(tmp_path):
     assert inspected["ok"] is True
     assert inspected["listener"]["secretAvailable"] is True
     secret_file = inspected["listener"]["secretRef"]["secretFile"]
-    assert open(secret_file, encoding="utf-8").read().strip() == ours.secret
+    assert open(secret_file, encoding="utf-8").read() == ours.secret
     assert ours.secret not in json.dumps(inspected, sort_keys=True)
 
     denied = _loads(ath_get_listener_tool({"thread_key": theirs.thread_key}, **_tool_kwargs(registry, tmp_path)))
@@ -318,6 +318,17 @@ def test_list_inspect_and_retire_are_owner_scoped_and_hide_secret(tmp_path):
     retired = _loads(ath_retire_listener_tool({"thread_key": ours.thread_key}, **_tool_kwargs(registry, tmp_path)))
     assert retired == {"action": "retired", "enabled": False, "ok": True, "secretMaterialRemoved": True, "threadKey": ours.thread_key}
     assert registry.get_handle(ours.thread_key).enabled is False
+    assert not os.path.exists(secret_file)
+
+    inspected_retired = _loads(ath_get_listener_tool({"thread_key": ours.thread_key}, **_tool_kwargs(registry, tmp_path)))
+    assert inspected_retired["ok"] is True
+    assert inspected_retired["listener"]["enabled"] is False
+    assert inspected_retired["listener"]["secretRef"]["available"] is False
+    assert not os.path.exists(secret_file)
+
+    rotated_retired = _loads(ath_rotate_listener_secret_tool({"thread_key": ours.thread_key}, **_tool_kwargs(registry, tmp_path)))
+    assert rotated_retired["ok"] is False
+    assert rotated_retired["error"] == "listener_disabled"
     assert not os.path.exists(secret_file)
 
 
@@ -335,7 +346,15 @@ async def test_rotate_listener_secret_invalidates_old_secret_and_refreshes_secre
     assert old_handle is not None
     old_secret = old_handle.secret
     secret_file = created["secret"]["secretFile"]
-    assert open(secret_file, encoding="utf-8").read().strip() == old_secret
+    assert open(secret_file, encoding="utf-8").read() == old_secret
+
+    target = FakeSendAdapter()
+    adapter = AsyncThreadsAdapter(PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")}))
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+    body = _event_body(old_handle, event_id="evt-old-file")
+    file_secret_response = await adapter._handle_event(FakeRequest(body, open(secret_file, encoding="utf-8").read()))
+    assert file_secret_response.status == 200
+    assert len(target.sent) == 1
 
     rotated = _loads(ath_rotate_listener_secret_tool({"thread_key": thread_key}, **_tool_kwargs(registry, tmp_path)))
 
@@ -344,7 +363,7 @@ async def test_rotate_listener_secret_invalidates_old_secret_and_refreshes_secre
     new_handle = registry.get_handle(thread_key)
     assert new_handle is not None
     assert new_handle.secret != old_secret
-    assert open(rotated["secret"]["secretFile"], encoding="utf-8").read().strip() == new_handle.secret
+    assert open(rotated["secret"]["secretFile"], encoding="utf-8").read() == new_handle.secret
     assert old_secret not in json.dumps(rotated, sort_keys=True)
     assert new_handle.secret not in json.dumps(rotated, sort_keys=True)
 

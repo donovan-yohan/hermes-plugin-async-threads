@@ -90,7 +90,7 @@ def test_listen_captures_current_source_and_returns_secret_reference(tmp_path):
     assert handle.workflow_policy.candidate_required == ("qa",)
     assert handle.secret not in response
     secret_file = tmp_path / "secrets" / handle.thread_key / "secret.txt"
-    assert secret_file.read_text(encoding="utf-8").strip() == handle.secret
+    assert secret_file.read_text(encoding="utf-8") == handle.secret
 
     direct_response = _run_command(
         "listen relay --policy direct --ack debug",
@@ -108,7 +108,14 @@ def test_listen_captures_current_source_and_returns_secret_reference(tmp_path):
     assert "rotated async-thread listener secret" in rotate_response
     assert "secretFile:" in rotate_response
     assert rotated.secret not in rotate_response
-    assert secret_file.read_text(encoding="utf-8").strip() == rotated.secret
+    assert secret_file.read_text(encoding="utf-8") == rotated.secret
+
+    retire_response = _run_command(f"retire {handle.thread_key}", event=event, gateway=gateway)
+    assert retire_response == f"retired async-thread listener `{handle.thread_key}`."
+    assert not secret_file.exists()
+    disabled_rotate_response = _run_command(f"rotate-secret {handle.thread_key}", event=event, gateway=gateway)
+    assert disabled_rotate_response == "async-thread listener is disabled; resume before rotating secret."
+    assert not secret_file.exists()
 
     bad_response = _run_command(
         "listen relay --debounce 999",

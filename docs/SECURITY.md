@@ -13,9 +13,9 @@ Agent-facing messages render event data under an explicit untrusted-data boundar
 - Producers sign the exact request body with HMAC-SHA256.
 - Header shape: `X-Hermes-Signature-256: sha256=<hex>`.
 - Each listener has a per-handle secret generated when the listener is created.
-- Listener creation writes producer-facing secret material to a profile data path such as `~/.hermes/profiles/<profile>/data/async-threads/emitters/<threadKey>/secret.txt`; normal command/tool output shows the file/contract paths, not the raw secret.
+- Listener creation writes producer-facing secret material to a profile data path such as `~/.hermes/profiles/<profile>/data/async-threads/emitters/<threadKey>/secret.txt`; normal command/tool output shows the file/contract paths, not the raw secret. The generated `secret.txt` is written without a trailing newline.
 - On POSIX systems the generated secret and contract files are written with `0600` file mode, and parent directories are made private where supported.
-- Rotating a listener secret updates SQLite and overwrites the producer-facing secret file. Revoked/retired listeners reject future events with the generic auth error.
+- Rotating an active listener secret updates SQLite and overwrites the producer-facing secret file. Disabled listeners cannot be rotated. Revoked/retired listeners reject future events with the generic auth error, and inspection does not recreate removed producer-facing secret artifacts.
 
 ## Replay and de-dupe
 

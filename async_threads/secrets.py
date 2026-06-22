@@ -24,9 +24,9 @@ class SecretArtifact:
     secret_file: Path
     contract_file: Path
 
-    def public_ref(self) -> dict[str, Any]:
+    def public_ref(self, *, available: bool = True) -> dict[str, Any]:
         return {
-            "available": True,
+            "available": available,
             "returned": False,
             "secretFile": str(self.secret_file),
             "contractFile": str(self.contract_file),
@@ -49,7 +49,7 @@ def write_secret_artifact(
     _mkdir_private(directory)
     secret_file = directory / "secret.txt"
     contract_file = directory / "contract.json"
-    _write_private_text(secret_file, handle.secret + "\n")
+    _write_private_text(secret_file, handle.secret)
     contract = {
         "version": "async-thread-secret/v1",
         "threadKey": handle.thread_key,
@@ -58,8 +58,9 @@ def write_secret_artifact(
         "eventUrl": event_url,
         "secretFile": str(secret_file),
         "requiredHeaders": ["Content-Type: application/json", "X-Hermes-Signature-256: sha256=<hex>"],
-        "signature": "hex_hmac_sha256(secret_file_contents, exact_utf8_request_body_bytes)",
+        "signature": "hex_hmac_sha256(secret_file_text_without_trailing_newline, exact_utf8_request_body_bytes)",
         "notes": [
+            "secret.txt is written without a trailing newline; use its exact file text as the HMAC key.",
             "Do not paste the secret into chat, prompts, logs, issue comments, or event payloads.",
             "Use ATH_SECRET_FILE or another local secret manager reference when running producer code.",
         ],
@@ -82,8 +83,13 @@ def describe_secret_artifact(
 ) -> dict[str, Any]:
     """Return a non-secret producer-facing reference for a handle."""
 
-    artifact = write_secret_artifact(handle, event_url=event_url, root=root) if ensure else _artifact_for(handle, root=root)
-    return artifact.public_ref()
+    if ensure:
+        artifact = write_secret_artifact(handle, event_url=event_url, root=root)
+        available = True
+    else:
+        artifact = _artifact_for(handle, root=root)
+        available = artifact.secret_file.exists() and artifact.contract_file.exists()
+    return artifact.public_ref(available=available)
 
 
 def remove_secret_artifact(thread_key: str, *, root: str | Path | None = None) -> bool:
