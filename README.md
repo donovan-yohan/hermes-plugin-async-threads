@@ -108,7 +108,8 @@ See [`docs/SECURITY.md`](docs/SECURITY.md) for more detail.
 - generic workflow-stage/candidate/evidence tracking with serial/parallel gate policy;
 - explicit agent-queue continuation policy metadata, with fail-closed mode when hard Hermes core bounds are required;
 - producer helper script for compact background-lane events;
-- model-facing producer handoff generation for generic contracts, local emitter files, GitHub Actions recipes, and explicit debug emitters.
+- model-facing producer handoff generation for generic contracts, local emitter files, GitHub Actions recipes, and explicit debug emitters;
+- benchmarkable synthetic agent-tool scenarios for PR review lanes, local long jobs, external producers, and debug/admin workflows.
 
 ## Known limitations
 
