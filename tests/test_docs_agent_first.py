@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -64,3 +65,34 @@ def test_bridge_recipes_include_complete_natural_language_to_event_workflow():
     assert '"eventType": "repo-review.ready"' in text
     assert "Do not paste the raw secret" in text
     assert "Manual `/ath` admin/debug path" in text
+
+
+def test_public_docs_do_not_overclaim_hard_bounded_continuations():
+    checked = {
+        "README.md": _read("README.md"),
+        "docs/PROBLEM_STATEMENT.md": _read("docs/PROBLEM_STATEMENT.md"),
+        "docs/EVENT_CONTRACT.md": _read("docs/EVENT_CONTRACT.md"),
+        "docs/spikes/hermes-async-thread-feasibility.md": _read("docs/spikes/hermes-async-thread-feasibility.md"),
+        "skills/async-thread-agent-tools/SKILL.md": _read("skills/async-thread-agent-tools/SKILL.md"),
+    }
+
+    forbidden = [
+        r"(?<!un)\bbounded agent continuation\b",
+        r"(?<!un)\bbounded agent run\b",
+        r"(?<!un)\bbounded prompt\b",
+        r"(?<!un)\bbounded text prompt\b",
+        r"(?<!un)\bbounded summarization\b",
+        r"\bbounded_continuation_policy\b",
+        r"\bpolicy enforces max turns/toolsets/model\b",
+    ]
+    offenders = []
+    for path, text in checked.items():
+        for pattern in forbidden:
+            if re.search(pattern, text, flags=re.IGNORECASE):
+                offenders.append(f"{path}: {pattern}")
+    assert offenders == []
+
+    problem = checked["docs/PROBLEM_STATEMENT.md"]
+    assert "Current Hermes core does not yet expose plugin-local hard caps" in problem
+    assert "strict hard-bound requirements must use fail-closed mode" in problem
+    assert "explicit continuation policy metadata" in problem

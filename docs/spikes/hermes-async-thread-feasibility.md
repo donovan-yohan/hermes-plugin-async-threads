@@ -23,6 +23,8 @@ The MVP UX target is deliberately narrower than “generic webhook runs”:
 - `donovan-yohan/hermes-plugin-async-threads@176b0c1dca928b40c3dd57283cd0c4c5333310ec` (`main`)
 - local Hermes Agent checkout used for the original spike; update against a current Hermes checkout before implementation decisions.
 
+> Historical note: this spike predates the current `coreEnforced: false` continuation-policy caveat. Treat any hard-bound language below as an implementation target/core-seam requirement, not as a claim that the current plugin can hard-cap a synthetic gateway event without `failClosedWithoutCoreBounds`.
+
 ## Research questions
 
 ### 1. Does Hermes already have a normalized gateway event model we can reuse?
@@ -87,7 +89,7 @@ Yes. This is already a production pattern inside Hermes.
 - Startup auto-resume enumerates persisted session entries with `origin`, builds an empty internal `MessageEvent(source=origin)`, and schedules it through a helper that ultimately routes it through the adapter/gateway message path.[^startup-resume]
 - Background process and async-delegation completions build synthetic `MessageEvent(..., internal=True, source=source)` and call `adapter.handle_message(synth_event)` so the completion re-enters the originating gateway session as a normal turn.[^process-inject][^async-delegation]
 
-That is almost exactly what async-thread agent-continuation needs. The plugin should synthesize a bounded text prompt from trusted route config and sanitized event fields, set `internal=True` after validating the producer signature, and call `adapter.handle_message(event)` for the platform stored in the handle.
+That is almost exactly what async-thread agent-continuation needs. The plugin should synthesize a compact, sanitized text prompt from trusted route config and sanitized event fields, set `internal=True` after validating the producer signature, and call `adapter.handle_message(event)` for the platform stored in the handle.
 
 Important detail: `SessionStore.get_or_create_session(source)` uses the source-derived session key and persists origin metadata on new sessions.[^session-create] If the stored `SessionSource` matches the original thread, Hermes reloads the same session lineage instead of creating a separate webhook session.
 
@@ -129,7 +131,7 @@ Without that, the safe default should be **queue**, not steer, for any event car
 
 | Claim | Evidence |
 |---|---|
-| Repo goal is exactly event-driven continuation into existing thread, not cron polling | README and problem statement describe signed events, async-thread key, origin/session restore, direct delivery vs bounded agent continuation, and avoiding cron polling.[^repo-readme][^problem-goals] |
+| Repo goal is exactly event-driven continuation into existing thread, not cron polling | README and problem statement describe signed events, async-thread key, origin/session restore, direct delivery vs agent continuation with explicit policy metadata, and avoiding cron polling.[^repo-readme][^problem-goals] |
 | Hermes has normalized gateway input events | `MessageEvent` fields include text, source, raw_message, message_id, channel prompt/context, and `internal`.[^message-event] |
 | Hermes has durable source/origin routing metadata | `SessionSource` includes platform/chat/thread/user metadata and serializes to/from dict.[^session-source] |
 | Sessions persist origin metadata | `SessionEntry.origin` exists and is serialized; new sessions are created with `origin=source`.[^session-entry-origin][^session-create] |
@@ -326,7 +328,7 @@ Minimum test seams:
    - malicious payload text like `ignore previous instructions` remains inside untrusted-data block;
    - route template controls instructions.
 7. Cost/tool bounds:
-   - policy enforces max turns/toolsets/model or rejects invalid unbounded policy.
+   - desired core seam either enforces max turns/toolsets/model or lets the plugin fail closed when hard per-event caps are unavailable.
 8. Multi-platform routing:
    - Discord thread id and Telegram topic id are preserved.
 
@@ -387,7 +389,7 @@ Those are implementation-spike items, not feasibility blockers.
 ## Footnotes
 
 [^repo-readme]: `README.md` lines 5-11 — missing abstraction is external producer re-waking an existing conversation/thread; cron polling workaround is called gross plumbing.
-[^problem-goals]: `docs/PROBLEM_STATEMENT.md` lines 59-104 and 258-269 — goals and MVP shape: event-driven continuation, durable handles, safe wake policy, producer-agnostic receiver, signed webhook, de-dupe, direct delivery and bounded agent continuation.
+[^problem-goals]: `docs/PROBLEM_STATEMENT.md` lines 59-104 and 258-269 — goals and MVP shape: event-driven continuation, durable handles, safe wake policy, producer-agnostic receiver, signed webhook, de-dupe, direct delivery and agent continuation with explicit policy metadata.
 [^message-event]: `gateway/platforms/base.py` lines 1422-1477 — `MessageEvent` dataclass fields, including `source`, `raw_message`, `message_id`, `channel_prompt`, `channel_context`, and `internal`.
 [^session-source]: `gateway/session.py` lines 70-156 — `SessionSource` fields and serialization/deserialization.
 [^session-entry-origin]: `gateway/session.py` lines 442-545 — `SessionEntry.origin` stores and serializes origin metadata.
