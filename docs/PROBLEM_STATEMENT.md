@@ -21,7 +21,7 @@ Hermes lacks a first-class event-driven way for an external system to re-wake an
 
 The desired behavior is:
 
-> A long-running external process emits a signed event. Hermes de-dupes it, resolves the existing conversation origin, optionally runs a bounded agent continuation, and posts the result back into the same Discord/Telegram/etc. thread where the work started.
+> A long-running external process emits a signed event. Hermes de-dupes it, resolves the existing conversation origin, optionally queues an agent continuation with explicit policy metadata, and posts the result back into the same Discord/Telegram/etc. thread where the work started. Current Hermes core does not yet expose plugin-local hard caps for an individual synthetic gateway event, so strict hard-bound requirements must use fail-closed mode.
 
 Today, cron has convenient `deliver: origin` semantics, but webhook-triggered runs and arbitrary external events do not have an equally ergonomic “resume this exact working thread” surface. Webhooks can trigger agent runs, and Hermes can deliver to platforms, but the missing abstraction is an **async thread**: a durable routing + context handle that external producers can target without hand-configuring a static channel for every workflow.
 
@@ -77,7 +77,7 @@ Hermes should maintain a durable mapping from an async workflow/thread key to de
 Not every event should blindly launch an expensive agent run. A route should be able to choose:
 
 - direct delivery only;
-- bounded summarization;
+- policy-scoped summarization;
 - full agent continuation;
 - ask-for-approval / suggest next action;
 - suppress/no-op if event is not actionable.
@@ -201,7 +201,7 @@ Routes should declare max turn count, toolsets, model/budget, direct-delivery vs
 
 3. **Delivery/continuation dispatcher**
    - direct-deliver small notifications when policy says so;
-   - start a bounded agent run when policy says agent continuation;
+   - queue an agent continuation with explicit policy metadata when policy says agent continuation;
    - deliver output back into the mapped origin thread;
    - preserve enough context to feel like the same working conversation.
 
@@ -257,7 +257,7 @@ A useful MVP can be small:
 2. Signed webhook receiver for `async-thread-event/v1`.
 3. De-dupe by `producerId + eventId`.
 4. Direct delivery mode into the registered origin thread.
-5. Agent-continuation mode with a bounded prompt and restricted toolsets.
+5. Agent-continuation mode with untrusted payload boxing plus explicit continuation policy metadata.
 6. One producer example: job finished / needs attention / blocked.
 7. CLI command to register/list/revoke async threads.
 8. Tests for signature validation, de-dupe, prompt injection boundary, origin routing, and fallback behavior.
