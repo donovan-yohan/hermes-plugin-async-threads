@@ -86,9 +86,13 @@ class OriginIndex:
 
     def lookup(self, *, session_id: str = "", session_key: str = "") -> OriginResolution | None:
         if session_id and session_id in self._by_session_id:
-            return self._by_session_id[session_id]
+            candidate = self._by_session_id[session_id]
+            if _resolution_matches(candidate, session_id=session_id, session_key=session_key):
+                return candidate
         if session_key and session_key in self._by_session_key:
-            return self._by_session_key[session_key]
+            candidate = self._by_session_key[session_key]
+            if _resolution_matches(candidate, session_id=session_id, session_key=session_key):
+                return candidate
         return None
 
 
@@ -114,8 +118,7 @@ def resolve_current_origin(
 
     Resolution order is deliberately conservative:
 
-    1. explicit trusted source object (`source`, `gateway_source`, or
-       `session_source`);
+    1. explicit trusted source object passed via the dedicated `source` parameter;
     2. active SessionStore lookup by session_id;
     3. active SessionStore lookup by session_key;
     4. persisted profile sessions.json lookup;
@@ -128,12 +131,16 @@ def resolve_current_origin(
     """
 
     context = dict(trusted_context or {})
-    trusted_source = source or context.get("gateway_source") or context.get("session_source")
+    trusted_source = source
     explicit_sid = _first_text(session_id, context.get("session_id"))
     explicit_skey = _first_text(session_key, context.get("session_key"))
     explicit_lookup = bool(explicit_sid or explicit_skey)
-    sid = explicit_sid or _session_env("HERMES_SESSION_ID")
-    skey = explicit_skey or ("" if explicit_sid else _session_env("HERMES_SESSION_KEY"))
+    if explicit_lookup:
+        sid = explicit_sid
+        skey = explicit_skey
+    else:
+        sid = _session_env("HERMES_SESSION_ID")
+        skey = _session_env("HERMES_SESSION_KEY")
 
     if trusted_source is not None:
         return _resolution_from_source(
@@ -225,7 +232,7 @@ def _resolution_from_source(
 def _lookup_store(store: Any, *, session_id: str, session_key: str) -> OriginResolution | None:
     if store is None:
         return None
-    entry = None
+    entries: list[Any] = []
     if session_id:
         lookup = getattr(store, "lookup_by_session_id", None)
         if callable(lookup):
@@ -233,17 +240,33 @@ def _lookup_store(store: Any, *, session_id: str, session_key: str) -> OriginRes
                 entry = lookup(session_id)
             except Exception:
                 entry = None
-    if entry is None and session_key:
+            if entry is not None:
+                entries.append(entry)
+    if session_key:
         entry = _get_store_entry_by_key(store, session_key)
-    if entry is None:
+        if entry is not None:
+            entries.append(entry)
+    for entry in entries:
+        resolution = _resolution_from_store_entry(entry, session_id=session_id, session_key=session_key)
+        if resolution is not None:
+            return resolution
+    return None
+
+
+def _resolution_from_store_entry(entry: Any, *, session_id: str, session_key: str) -> OriginResolution | None:
+    entry_session_key = str(getattr(entry, "session_key", "") or "")
+    entry_session_id = str(getattr(entry, "session_id", "") or "")
+    if session_id and entry_session_id != session_id:
+        return None
+    if session_key and entry_session_key != session_key:
         return None
     source = getattr(entry, "origin", None)
     if source is None:
         return None
     return _resolution_from_source(
         source,
-        session_key=str(getattr(entry, "session_key", "") or session_key),
-        session_id=str(getattr(entry, "session_id", "") or session_id),
+        session_key=entry_session_key or session_key,
+        session_id=entry_session_id or session_id,
         source_kind="session_store",
     )
 
@@ -300,7 +323,7 @@ def _lookup_sessions_file(path: Path | None, *, session_id: str, session_key: st
 def _resolution_from_session_context(*, session_id: str, session_key: str) -> OriginResolution | None:
     platform = _session_env("HERMES_SESSION_PLATFORM")
     chat_id = _session_env("HERMES_SESSION_CHAT_ID")
-    if not platform or not chat_id or platform in LOCAL_ONLY_PLATFORMS:
+    if not platform or not chat_id or _normalize_platform(platform) in LOCAL_ONLY_PLATFORMS:
         return None
     source = {
         "platform": platform,
@@ -316,9 +339,22 @@ def _resolution_from_session_context(*, session_id: str, session_key: str) -> Or
 
 
 def _source_is_gateway_routable(source: Mapping[str, Any]) -> bool:
-    platform = str(source.get("platform") or "")
+    platform = _normalize_platform(source.get("platform"))
     chat_id = str(source.get("chat_id") or "")
     return bool(platform and chat_id and platform not in LOCAL_ONLY_PLATFORMS)
+
+
+def _normalize_platform(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    return str(raw or "").strip().lower()
+
+
+def _resolution_matches(resolution: OriginResolution, *, session_id: str = "", session_key: str = "") -> bool:
+    if session_id and resolution.session_id != session_id:
+        return False
+    if session_key and resolution.session_key != session_key:
+        return False
+    return True
 
 
 def _session_key_for_source(gateway: Any | None, source: Any) -> str:

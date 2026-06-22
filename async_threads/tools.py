@@ -166,6 +166,8 @@ def ath_create_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
             origin=origin,
             producer_id=spec["producer_id"],
             event_types=tuple(spec["event_types"]),
+            policy=spec["policy"],
+            ack_mode=spec["ack_mode"],
         )
         if existing is not None:
             return _json(
@@ -364,6 +366,8 @@ def _listener_spec(args: Mapping[str, Any]) -> dict[str, Any]:
     ack_mode = str(args.get("ack") or "brief")
     if ack_mode not in {"none", "brief", "debug"}:
         ack_mode = "brief"
+    if policy == "direct":
+        ack_mode = "none"
     return {
         "producer_id": producer_id,
         "event_types": tuple(event_types),
@@ -380,11 +384,17 @@ def _find_equivalent_listener(
     origin: OriginResolution,
     producer_id: str,
     event_types: tuple[str, ...],
+    policy: str,
+    ack_mode: str,
 ) -> AsyncThreadHandle | None:
     for handle in registry.list_handles(owner_user_id=owner_user_id, include_disabled=False):
         if handle.producer_id != producer_id:
             continue
         if tuple(handle.allowed_event_types) != tuple(event_types):
+            continue
+        if handle.policy != policy:
+            continue
+        if handle.ack_mode != ack_mode:
             continue
         if _same_origin(handle, origin):
             return handle
@@ -473,6 +483,9 @@ def _secret_reference(handle: AsyncThreadHandle, *, event_url: str = "", config:
 
 def _event_url(config: Any) -> str:
     extra = getattr(config, "extra", {}) or {}
+    public_url = str(extra.get("public_url") or "").rstrip("/")
+    if public_url:
+        return f"{public_url}/async-threads/v1/events"
     scheme = "https" if extra.get("public_https") else "http"
     host = str(extra.get("public_host") or extra.get("host") or "127.0.0.1")
     port = int(extra.get("public_port") or extra.get("port") or 8765)

@@ -144,6 +144,83 @@ def test_explicit_session_id_ignores_unrelated_session_context_key(monkeypatch, 
     assert resolution.source_dict["thread_id"] == "thread-current"
 
 
+def test_explicit_session_key_ignores_unrelated_session_context_id(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        origin_module,
+        "_session_env",
+        lambda name: {
+            "HERMES_SESSION_ID": "env-session",
+            "HERMES_SESSION_KEY": "env-key",
+            "HERMES_SESSION_PLATFORM": "discord",
+            "HERMES_SESSION_CHAT_ID": "env-channel",
+        }.get(name, ""),
+    )
+    store = FakeStore(entry_by_session_id={"env-session": _entry(session_id="env-session", session_key="env-key")})
+
+    resolution = resolve_current_origin(
+        session_key="missing-key",
+        session_store=store,
+        sessions_file=tmp_path / "none.json",
+        origin_index=OriginIndex(),
+    )
+
+    assert resolution.ok is False
+    assert resolution.public_error()["error"] == "source_unavailable"
+
+
+def test_explicit_session_id_and_key_resolve_matching_store_entry(tmp_path):
+    store = FakeStore(
+        entry_by_session_id={"sid-requested": _entry(session_id="sid-requested", session_key="key-requested")},
+        entry_by_key={"key-requested": _entry(session_id="sid-requested", session_key="key-requested")},
+    )
+
+    resolution = resolve_current_origin(
+        session_id="sid-requested",
+        session_key="key-requested",
+        session_store=store,
+        sessions_file=tmp_path / "none.json",
+        origin_index=OriginIndex(),
+    )
+
+    assert resolution.ok is True
+    assert resolution.session_id == "sid-requested"
+    assert resolution.session_key == "key-requested"
+
+
+def test_explicit_session_id_and_key_must_match_same_store_entry(tmp_path):
+    store = FakeStore(
+        entry_by_session_id={"sid-requested": _entry(session_id="sid-requested", session_key="different-key")},
+        entry_by_key={"key-requested": _entry(session_id="different-sid", session_key="key-requested")},
+    )
+
+    resolution = resolve_current_origin(
+        session_id="sid-requested",
+        session_key="key-requested",
+        session_store=store,
+        sessions_file=tmp_path / "none.json",
+        origin_index=OriginIndex(),
+    )
+
+    assert resolution.ok is False
+    assert resolution.public_error()["error"] == "source_unavailable"
+
+
+def test_origin_index_requires_matching_explicit_session_id_and_key():
+    index = OriginIndex()
+    index.remember(source=_discord_source(thread_id="wrong"), session_id="sid-requested", session_key="different-key")
+    index.remember(source=_discord_source(thread_id="also-wrong"), session_id="different-sid", session_key="key-requested")
+
+    resolution = resolve_current_origin(
+        session_id="sid-requested",
+        session_key="key-requested",
+        origin_index=index,
+        sessions_file="/no/such/file",
+    )
+
+    assert resolution.ok is False
+    assert resolution.public_error()["error"] == "source_unavailable"
+
+
 def test_explicit_missing_session_does_not_fall_back_to_session_context(monkeypatch, tmp_path):
     monkeypatch.setattr(
         origin_module,
@@ -207,6 +284,39 @@ def test_does_not_trust_user_supplied_source_in_tool_arguments():
 
     assert resolution.ok is False
     assert resolution.public_error()["error"] == "source_unavailable"
+
+
+def test_does_not_trust_user_supplied_source_aliases_in_tool_arguments():
+    for key in ("gateway_source", "session_source"):
+        user_args = {
+            key: {
+                "platform": "discord",
+                "chat_id": "attacker-channel",
+                "thread_id": "attacker-thread",
+                "user_id": "attacker",
+            },
+            "session_id": "missing",
+        }
+
+        resolution = resolve_current_origin(
+            trusted_context=user_args,
+            session_store=FakeStore(),
+            origin_index=OriginIndex(),
+        )
+
+        assert resolution.ok is False
+        assert resolution.public_error()["error"] == "source_unavailable"
+
+
+def test_local_platform_enum_mapping_source_is_not_gateway_routable():
+    for platform in (Platform.LOCAL, Platform.API_SERVER):
+        resolution = resolve_current_origin(
+            source={"platform": platform, "chat_id": "terminal", "user_id": "user-1"},
+            session_id="sid-local",
+        )
+
+        assert resolution.ok is False
+        assert resolution.public_error()["error"] == "source_unavailable"
 
 
 def test_origin_resolution_can_feed_shared_listener_service(tmp_path):
