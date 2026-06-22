@@ -1,6 +1,6 @@
 # Bridge recipes and operator workflows
 
-This page collects producer-side patterns that are useful after `/ath listen` creates a signed route. The receiver still treats every event body as untrusted data; these recipes are about shaping safe state facts, not issuing instructions to Hermes.
+This page collects producer-side patterns after Hermes creates or reuses a signed async-thread route. The happy path is agent-first: a user asks Hermes to watch work and report here, Hermes uses model-facing ATH tools, and `/ath` remains the manual admin/debug surface. The receiver still treats every event body as untrusted data; these recipes are about shaping safe state facts, not issuing instructions to Hermes.
 
 ## Model-facing producer handoffs
 
@@ -14,6 +14,102 @@ The model-facing `ath_generate_producer_handoff` tool turns an existing listener
 Default handoffs include endpoint URL, thread key, producer id, allowed event types, a schema-valid example event, `secretFile`/`contractFile` references, retry/de-dupe guidance, and listener lifecycle guidance. Local helper files are written under the configured handoff root with restrictive permissions and read the HMAC key from `ATH_SECRET_FILE`; they do not embed the raw secret.
 
 Use this path for the happy-case agent workflow: create/reuse a listener, generate a producer handoff, give the producer the helper file path or contract, then verify delivery with `ath_trace_event` or `/ath trace`.
+
+## Complete agent-first workflow
+
+User ask:
+
+```text
+watch this PR review lane and report back here when it is ready or blocked
+```
+
+Agent actions:
+
+1. Call `ath_create_listener` from the current gateway conversation:
+
+   ```json
+   {
+     "purpose": "watch this PR review lane and report readiness or blockers back here",
+     "producer_hint": "repo-review",
+     "event_kinds": ["ready", "blocked"],
+     "delivery": "agent_queue",
+     "max_turns": 1,
+     "max_tool_calls": 0
+   }
+   ```
+
+2. Call `ath_generate_producer_handoff` for the returned `threadKey`:
+
+   ```json
+   {"thread_key": "ath_...", "mode": "generic_contract"}
+   ```
+
+3. Give the producer the generated `contractFile` or helper path and the `ATH_SECRET_FILE` reference. Do not paste the raw secret.
+
+4. Producer sends a signed event when review state changes:
+
+   ```json
+   {
+     "version": "async-thread-event/v1",
+     "eventId": "repo-review-37-head-abcd-ready",
+     "eventType": "repo-review.ready",
+     "producer": {"id": "repo-review"},
+     "occurredAt": "2026-06-20T19:00:00Z",
+     "asyncThread": {"threadKey": "ath_..."},
+     "summary": "PR #37 is ready for review",
+     "tailMode": "compact",
+     "subject": {"repo": "example/repo", "pr": 37, "url": "https://example.invalid/repo/pull/37"},
+     "payload": {"status": "ready", "head_sha": "abcd1234"}
+   }
+   ```
+
+5. Verify with `ath_trace_event` or `/ath trace repo-review-37-head-abcd-ready`.
+
+## Local script wrapper
+
+User ask:
+
+```text
+run this long script and ping this thread when it finishes or fails
+```
+
+Agent defaults:
+
+- `producer_hint: "local-job"`
+- `event_kinds: ["finished", "failed"]`
+- `delivery: "agent_queue"` unless the user only wants a direct notification
+- handoff mode: `local_script`
+
+Producer guidance:
+
+- write full stdout/stderr to a local log file;
+- send compact `status`, `verification`, `duration`, and `log_path` fields;
+- use `tailMode: "compact"` or `"none"` for routine events;
+- retry transport/`502` failures with the same `eventId`.
+
+## PR/review lane
+
+Use this for repository automation, code review lanes, or CI review gates.
+
+Recommended event types:
+
+- `repo-review.ready`
+- `repo-review.blocked`
+- `repo-review.failed`
+- `repo-review.finished`
+
+Keep one event id per immutable review artifact, for example `<repo>:pr-<n>:<head_sha>:ready`. Before acting on a stale event, the agent should re-check the current PR head.
+
+## Manual `/ath` admin/debug path
+
+Use `/ath` when the user explicitly asks to administer or debug listeners:
+
+- `/ath status` — receiver/config state.
+- `/ath list` / `/ath inspect` — listener inventory.
+- `/ath trace <event_id>` / `/ath events <thread_key>` — delivery diagnostics.
+- `/ath pause` / `/ath resume` / `/ath retire` / `/ath revoke` — lifecycle.
+- `/ath rotate-secret` — active-listener secret rotation.
+- `/ath prune --dry-run` — retention cleanup preview.
 
 ## Sandbox-safe emit command
 

@@ -1,6 +1,6 @@
 # Agent-tool scenario harness
 
-`async-threads` has a CI-runnable scenario harness for the agent-first UX tracked in issue #58. It grades workflow behavior, not microsecond performance.
+`async-threads` has a CI-runnable scenario harness for the agent-first UX tracked in issue #58. It grades workflow behavior, not microsecond performance. The matching reusable agent skill lives at [`../skills/async-thread-agent-tools/SKILL.md`](../skills/async-thread-agent-tools/SKILL.md).
 
 Run it from the repo root:
 

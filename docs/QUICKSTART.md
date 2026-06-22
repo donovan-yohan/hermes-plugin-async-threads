@@ -7,7 +7,7 @@ This quickstart exercises the current gateway-local MVP. It assumes a Hermes gat
 - Hermes Agent with gateway plugin support.
 - This plugin installed in the active Hermes profile.
 - `aiohttp` available in the Hermes runtime environment.
-- A supported gateway conversation where you can send `/ath` commands. The tested MVP path is Discord-shaped gateway sessions.
+- A supported gateway conversation where Hermes can resolve the current origin. The tested MVP path is Discord-shaped gateway sessions.
 
 ## Enable the plugin
 
@@ -46,15 +46,22 @@ Expected shape:
 {"ok": true, "platform": "async_threads"}
 ```
 
-## Create a listener
+## Agent happy path: ask Hermes to watch and report here
 
-From the gateway conversation you want to wake later:
+From the gateway conversation you want to wake later, ask Hermes naturally:
 
 ```text
-/ath listen demo --events demo.job.finished --ack brief --label "demo async job"
+watch this demo async job and report back here when it finishes
 ```
 
-The command response includes:
+The agent should use the model-facing ATH tools instead of making you learn `/ath listen` flags:
+
+1. `ath_create_listener` with a stable producer id such as `demo`, narrow event kinds such as `finished`, and the current conversation as the target.
+2. `ath_generate_producer_handoff` with `mode: local_script`, `github_actions`, or `generic_contract` depending on the producer.
+3. Give the producer the generated `contractFile`, helper file, or `ATH_SECRET_FILE` path. The raw HMAC secret is not printed in normal tool output.
+4. Verify delivery with `ath_trace_event` or `/ath trace <event_id>`.
+
+A successful listener result includes:
 
 - `threadKey`
 - receiver URL
@@ -63,7 +70,15 @@ The command response includes:
 
 Save the `threadKey` and pass the `secretFile` path to the producer through a local secret manager, mounted file, or `ATH_SECRET_FILE`. The generated `secret.txt` is written without a trailing newline, so producer examples read the file text directly. The raw secret is not printed in normal command/tool output.
 
-Useful management commands:
+## Manual `/ath` path: admin/debug/power users
+
+Manual listener creation is still supported when you explicitly want to administer ATH yourself:
+
+```text
+/ath listen demo --events demo.job.finished --ack brief --label "demo async job"
+```
+
+Useful management/debug commands:
 
 ```text
 /ath status
@@ -84,7 +99,7 @@ Useful management commands:
 
 ## Send a signed demo event
 
-Replace the environment variables with values from `/ath listen`.
+Replace the environment variables with values from the tool-created listener/handoff or the manual `/ath listen` response.
 
 ```bash
 export ATH_URL="http://127.0.0.1:8765/async-threads/v1/events"
@@ -189,7 +204,7 @@ Use `tailMode: debug` only for explicit debugging. Debug tails are redacted and 
 
 ## Current limitations
 
-- Listener creation is a gateway chat command, not a generic CLI/Desktop command.
+- Listener creation needs a resolvable live gateway origin. Model tools handle this from a supported gateway conversation; CLI/Desktop/no-source contexts fail closed instead of guessing a destination.
 - The receiver assumes the target platform adapter is connected in the same gateway process/profile.
 - Non-Discord gateway support is intended but needs compatibility tests.
 - Direct-delivery routing metadata still needs a stable platform-aware continuation helper.
