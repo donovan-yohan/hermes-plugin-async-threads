@@ -37,7 +37,7 @@ _CREATE_SCHEMA = {
             "max_turns": {"type": "integer", "description": "Agent-queue continuation intent. Default 1; metadata only until Hermes exposes plugin-enforced per-event caps."},
             "max_tool_calls": {"type": "integer", "description": "Agent-queue tool-call cap intent. Default 0."},
             "timeout_seconds": {"type": "integer", "description": "Agent-queue timeout intent. Default 120 seconds."},
-            "continuation_toolsets": {"type": "array", "items": {"type": "string"}, "description": "Optional toolsets intended for bounded continuation metadata."},
+            "continuation_toolsets": {"type": "array", "items": {"type": "string"}, "description": "Optional toolsets intended for continuation policy metadata."},
             "fail_closed_without_core_bounds": {"type": "boolean", "description": "If true, reject agent_queue dispatch while Hermes core lacks hard per-event bounds."},
         },
         "required": ["purpose"],
@@ -330,8 +330,14 @@ def ath_generate_producer_handoff_tool(args: dict[str, Any], **kwargs: Any) -> s
     if not handle.enabled:
         return _json(_error("listener_disabled", "async-thread listener is disabled; resume before generating producer handoff"))
     mode = str(args.get("mode") or "generic_contract")
-    create_files = bool(args.get("create_files", True))
-    include_sensitive_secret = bool(args.get("include_sensitive_secret", False))
+    create_files_value = args.get("create_files", True)
+    include_sensitive_secret_value = args.get("include_sensitive_secret", False)
+    if not isinstance(create_files_value, bool):
+        return _json(_error("invalid_request", "create_files must be a boolean"))
+    if not isinstance(include_sensitive_secret_value, bool):
+        return _json(_error("invalid_request", "include_sensitive_secret must be a boolean"))
+    create_files = create_files_value
+    include_sensitive_secret = include_sensitive_secret_value
     sensitive_allowed = mode.strip().lower().replace("-", "_") in {"debug_curl", "debug", "curl"}
     if include_sensitive_secret and not sensitive_allowed:
         return _json(_error("invalid_request", "include_sensitive_secret is only allowed with debug_curl mode"))

@@ -500,6 +500,16 @@ def test_generate_handoff_debug_secret_requires_explicit_sensitive_flag(tmp_path
     assert invalid["ok"] is False
     assert invalid["error"] == "invalid_request"
 
+    string_false = _loads(
+        ath_generate_producer_handoff_tool(
+            {"thread_key": handle.thread_key, "mode": "debug_curl", "include_sensitive_secret": "false"},
+            **_tool_kwargs(registry, tmp_path),
+        )
+    )
+    assert string_false["ok"] is False
+    assert string_false["error"] == "invalid_request"
+    assert handle.secret not in json.dumps(string_false, sort_keys=True)
+
     sensitive = _loads(
         ath_generate_producer_handoff_tool(
             {"thread_key": handle.thread_key, "mode": "debug_curl", "include_sensitive_secret": True},

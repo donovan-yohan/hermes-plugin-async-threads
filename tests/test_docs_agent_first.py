@@ -15,6 +15,8 @@ def test_readme_teaches_agent_happy_path_before_manual_ath():
     assert "call `ath_create_listener`" in text
     assert "call `ath_generate_producer_handoff`" in text
     assert "gateway commands for manual admin/debug" in text
+    assert "Current Hermes core does not expose plugin-local hard caps" in text
+    assert "fail-closed mode" in text
 
 
 def test_quickstart_distinguishes_agent_happy_path_from_manual_admin():
@@ -42,8 +44,12 @@ def test_agent_skill_contains_safe_defaults_and_antipatterns():
         "ATH_SECRET_FILE",
         "Do not create cron polling loops",
         "Do not hardcode Discord/Telegram/Slack ids",
+        "Do not let producers post directly to Discord, Telegram, Slack, or any other chat platform",
         "Do not dump raw JSON/logs/transcripts into the agent prompt",
         "Do not start unbounded agent continuations",
+        "Do not leak HMAC secrets",
+        "coreEnforced: false",
+        "fail_closed_without_core_bounds: true",
     ]
     missing = [item for item in required if item not in text]
     assert missing == []

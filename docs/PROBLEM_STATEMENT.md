@@ -32,7 +32,7 @@ A user starts long-running work from a gateway conversation. The work runs outsi
 1. keep the original Hermes conversation as the operator cockpit;
 2. let the external producer work independently;
 3. send a signed event when the work needs attention;
-4. have Hermes resolve the existing conversation and either post a direct notification or queue a bounded continuation;
+4. have Hermes resolve the existing conversation and either post a direct notification or queue an agent continuation with explicit policy metadata;
 5. avoid polling loops and hardcoded chat-platform delivery code in the producer.
 
 The workaround is a finite quiet cron job that polls external state and posts only when it sees a transition. That avoids chat spam, but it still adds polling, scheduler state, and lifecycle cleanup burden.
@@ -269,7 +269,7 @@ A useful MVP can be small:
 - Untrusted payload text is not treated as instruction.
 - A missing/revoked async-thread handle fails closed.
 - The user can see and manage registered async threads.
-- The plugin can direct-deliver or run a bounded continuation based on route policy.
+- The plugin can direct-deliver or queue an agent continuation with explicit policy metadata based on route policy. Current Hermes core does not yet expose plugin-local hard caps for an individual synthetic gateway event.
 - The pattern is generic enough for multiple producer types.
 
 ## Anti-patterns to avoid

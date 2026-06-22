@@ -9,7 +9,7 @@ uv run python scripts/ci/run_agent_tool_scenarios.py
 uv run python scripts/ci/run_agent_tool_scenarios.py --json
 ```
 
-The harness uses synthetic Hermes gateway/session objects and a fake Discord-like target adapter. It does not depend on live Discord.
+The harness uses synthetic Hermes gateway/session objects and a fake Discord-like target adapter. It does not depend on live Discord, but it does import Hermes gateway modules; set `HERMES_AGENT_PATH=/path/to/hermes-agent` if the local checkout is not auto-detected.
 
 ## Scenarios
 
@@ -31,8 +31,8 @@ The JSON report has:
     "scenarioCount": 4,
     "passedScenarios": 4,
     "failedScenarios": 0,
-    "checksPassed": 30,
-    "checksTotal": 30
+    "checksPassed": 32,
+    "checksTotal": 32
   },
   "scenarios": [
     {
