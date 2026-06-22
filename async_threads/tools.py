@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any, Iterable, Mapping
 
 from .adapter import registry_from_config
+from .handoffs import build_producer_handoff, handoff_root_from_config
 from .listeners import ListenValidationError, create_listener
 from .origin import OriginResolution, resolve_current_origin
 from .privacy import redact_metadata_text, safe_event_id
@@ -79,6 +80,29 @@ _ROTATE_SCHEMA = {
     },
 }
 
+_HANDOFF_SCHEMA = {
+    "name": "ath_generate_producer_handoff",
+    "description": "Generate a safe producer handoff for an existing listener: contract, local emitter files, GitHub Actions recipe, or debug curl-like emitter. Raw secrets are not returned unless explicitly requested for debug output.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "thread_key": {"type": "string", "description": "ATH listener thread key."},
+            "mode": {
+                "type": "string",
+                "enum": ["generic_contract", "local_script", "github_actions", "debug_curl"],
+                "description": "Handoff shape. Default generic_contract.",
+            },
+            "event_type": {"type": "string", "description": "Optional allowed event type to use in examples. Defaults to the first listener event type."},
+            "create_files": {"type": "boolean", "description": "For local_script/github_actions modes, write helper files. Default true."},
+            "include_sensitive_secret": {
+                "type": "boolean",
+                "description": "Debug-only escape hatch that returns a literal secret. Default false; do not use in normal chat.",
+            },
+        },
+        "required": ["thread_key"],
+    },
+}
+
 _TRACE_SCHEMA = {
     "name": "ath_trace_event",
     "description": "Inspect recent async-thread delivery/de-dupe diagnostics scoped to the current owner.",
@@ -134,6 +158,14 @@ def register_tools(ctx: Any) -> None:
         schema=_ROTATE_SCHEMA,
         handler=ath_rotate_listener_secret_tool,
         description=_ROTATE_SCHEMA["description"],
+        emoji="🧵",
+    )
+    ctx.register_tool(
+        name="ath_generate_producer_handoff",
+        toolset=TOOLSET,
+        schema=_HANDOFF_SCHEMA,
+        handler=ath_generate_producer_handoff_tool,
+        description=_HANDOFF_SCHEMA["description"],
         emoji="🧵",
     )
     ctx.register_tool(
@@ -276,6 +308,36 @@ def ath_rotate_listener_secret_tool(args: dict[str, Any], **kwargs: Any) -> str:
             "secret": _secret_reference(rotated, event_url=event_url, config=config),
         }
     )
+
+
+def ath_generate_producer_handoff_tool(args: dict[str, Any], **kwargs: Any) -> str:
+    registry, config = _registry_and_config(kwargs)
+    origin = _resolve_origin(kwargs)
+    if not origin.ok:
+        return _json(origin.public_error())
+    thread_key = str(args.get("thread_key") or "")
+    handle = _owned_handle(registry, thread_key, origin)
+    if handle is None:
+        return _json(_error("not_found", "async-thread listener not found"))
+    if not handle.enabled:
+        return _json(_error("listener_disabled", "async-thread listener is disabled; resume before generating producer handoff"))
+    mode = str(args.get("mode") or "generic_contract")
+    create_files = bool(args.get("create_files", True))
+    include_sensitive_secret = bool(args.get("include_sensitive_secret", False))
+    sensitive_allowed = mode.strip().lower().replace("-", "_") in {"debug_curl", "debug", "curl"}
+    if include_sensitive_secret and not sensitive_allowed:
+        return _json(_error("invalid_request", "include_sensitive_secret is only allowed with debug_curl mode"))
+    payload = build_producer_handoff(
+        handle,
+        event_url=_event_url(config),
+        secret_root=secret_root_from_config(config),
+        handoff_root=handoff_root_from_config(config),
+        mode=mode,
+        event_type=str(args.get("event_type") or ""),
+        create_files=create_files,
+        include_sensitive_secret=include_sensitive_secret,
+    )
+    return _json(payload)
 
 
 def ath_trace_event_tool(args: dict[str, Any], **kwargs: Any) -> str:

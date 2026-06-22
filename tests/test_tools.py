@@ -1,17 +1,22 @@
+import asyncio
 import hashlib
 import hmac
 import json
 import os
+import socket
+import subprocess
 import time
 from types import SimpleNamespace
 
 import pytest
+from jsonschema import validate
 
 from async_threads.adapter import AsyncThreadsAdapter
 from async_threads.plugin import register
 from async_threads.registry import AsyncThreadRegistry
 from async_threads.tools import (
     ath_create_listener_tool,
+    ath_generate_producer_handoff_tool,
     ath_get_listener_tool,
     ath_list_listeners_tool,
     ath_retire_listener_tool,
@@ -113,11 +118,18 @@ def _tool_kwargs(registry, tmp_path, entry=None):
                 "host": "127.0.0.1",
                 "port": 9999,
                 "secret_root": str(tmp_path / "secrets"),
+                "handoff_root": str(tmp_path / "handoffs"),
             },
         ),
         "session_id": (entry or _entry()).session_id,
         "session_store": FakeStore(entry or _entry()),
     }
+
+
+def _free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 def _loads(result: str):
@@ -150,6 +162,7 @@ def test_plugin_registers_model_facing_tools():
         "ath_get_listener",
         "ath_retire_listener",
         "ath_rotate_listener_secret",
+        "ath_generate_producer_handoff",
         "ath_trace_event",
     }
     assert {entry["toolset"] for entry in ctx.tools.values()} == {"plugin_async_threads"}
@@ -213,6 +226,187 @@ def test_create_listener_tool_uses_public_url_for_model_output(tmp_path):
 
     assert result["listener"]["eventUrl"] == "https://ath.example.test/base/async-threads/v1/events"
     assert json.load(open(result["secret"]["contractFile"], encoding="utf-8"))["eventUrl"] == "https://ath.example.test/base/async-threads/v1/events"
+
+
+def test_generate_producer_handoff_generic_contract_is_schema_valid_and_secret_safe(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    created = _loads(
+        ath_create_listener_tool(
+            {"purpose": "watch build", "producer_hint": "demo-ci", "event_kinds": ["finished"]},
+            **_tool_kwargs(registry, tmp_path),
+        )
+    )
+    handle = registry.get_handle(created["listener"]["threadKey"])
+    assert handle is not None
+
+    handoff = _loads(
+        ath_generate_producer_handoff_tool(
+            {"thread_key": handle.thread_key, "mode": "generic_contract"},
+            **_tool_kwargs(registry, tmp_path),
+        )
+    )
+
+    schema = json.load(open("docs/schemas/async-thread-event-v1.schema.json", encoding="utf-8"))
+    validate(instance=handoff["exampleEvent"], schema=schema)
+    rendered = json.dumps(handoff, sort_keys=True)
+    assert handoff["ok"] is True
+    assert handoff["mode"] == "generic_contract"
+    assert handoff["producerId"] == "demo-ci"
+    assert handoff["defaultEventType"] == "demo-ci.finished"
+    assert handoff["contract"]["secretFile"] == created["secret"]["secretFile"]
+    assert handoff["retryDeduping"]["reuseEventIdOnRetry"] is True
+    assert handoff["safety"]["eventPayloadsAreUntrustedData"] is True
+    assert handle.secret not in rendered
+
+
+@pytest.mark.asyncio
+async def test_generate_local_script_handoff_files_emit_signed_event_and_dedupe(tmp_path):
+    port = _free_port()
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    kwargs = _tool_kwargs(registry, tmp_path)
+    kwargs["config"] = PlatformConfig(
+        enabled=True,
+        extra={
+            "registry_path": str(tmp_path / "ath.sqlite3"),
+            "host": "127.0.0.1",
+            "port": port,
+            "secret_root": str(tmp_path / "secrets"),
+            "handoff_root": str(tmp_path / "handoffs"),
+        },
+    )
+    created = _loads(
+        ath_create_listener_tool(
+            {"purpose": "watch build", "producer_hint": "demo-ci", "event_kinds": ["finished"], "delivery": "direct"},
+            **kwargs,
+        )
+    )
+    handle = registry.get_handle(created["listener"]["threadKey"])
+    assert handle is not None
+
+    handoff = _loads(
+        ath_generate_producer_handoff_tool(
+            {"thread_key": handle.thread_key, "mode": "local_script"},
+            **kwargs,
+        )
+    )
+
+    files = handoff["files"]
+    assert handoff["localScript"]["secretHandling"] == "read ATH_SECRET_FILE locally; never print it"
+    config_file = files["configFile"]
+    emitter_script = files["emitterScript"]
+    assert str(tmp_path / "handoffs") in config_file
+    assert files["containsRawSecret"] is False
+    assert handle.secret not in json.dumps(handoff, sort_keys=True)
+    assert handle.secret not in open(config_file, encoding="utf-8").read()
+    assert handle.secret not in open(emitter_script, encoding="utf-8").read()
+    if os.name == "posix":
+        assert oct(os.stat(config_file).st_mode & 0o777) == "0o600"
+        assert oct(os.stat(emitter_script).st_mode & 0o777) == "0o600"
+    config = json.load(open(config_file, encoding="utf-8"))
+    assert config["secretFile"] == created["secret"]["secretFile"]
+    assert open(config["secretFile"], encoding="utf-8").read() == handle.secret
+
+    target = FakeSendAdapter()
+    adapter = AsyncThreadsAdapter(kwargs["config"])
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+    await adapter.connect()
+    env = {
+        **os.environ,
+        "ATH_HANDOFF_CONFIG": config_file,
+        "ATH_EVENT_ID": "evt-handoff-file-success",
+        "ATH_STATUS": "passed",
+    }
+    try:
+        first = await asyncio.to_thread(subprocess.run, ["python3", emitter_script], env=env, text=True, capture_output=True, timeout=20)
+        second = await asyncio.to_thread(subprocess.run, ["python3", emitter_script], env=env, text=True, capture_output=True, timeout=20)
+    finally:
+        await adapter.disconnect()
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert "delivered" in first.stdout
+    assert "duplicate" in second.stdout
+    assert len(target.sent) == 1
+    outcomes = [event.outcome for event in registry.list_recent_events(thread_key=handle.thread_key, limit=5)]
+    assert "direct_delivered" in outcomes
+    assert "duplicate" in outcomes
+
+
+def test_generate_handoff_github_actions_includes_recipe_and_helper_file(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    created = _loads(ath_create_listener_tool({"purpose": "watch build", "producer_hint": "demo-ci"}, **_tool_kwargs(registry, tmp_path)))
+    handle = registry.get_handle(created["listener"]["threadKey"])
+    assert handle is not None
+
+    handoff = _loads(
+        ath_generate_producer_handoff_tool(
+            {"thread_key": handle.thread_key, "mode": "github_actions"},
+            **_tool_kwargs(registry, tmp_path),
+        )
+    )
+
+    assert handoff["githubActions"]["requiredSecrets"] == ["ATH_SECRET"]
+    assert handoff["githubActions"]["requiredEnv"]["ATH_THREAD_KEY"] == handle.thread_key
+    assert "githubActionsStep" in handoff["files"]
+    step = open(handoff["files"]["githubActionsStep"], encoding="utf-8").read()
+    assert "${{ secrets.ATH_SECRET }}" in step
+    assert handle.secret not in json.dumps(handoff, sort_keys=True)
+    assert handle.secret not in step
+
+
+def test_generate_handoff_debug_secret_requires_explicit_sensitive_flag(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    created = _loads(ath_create_listener_tool({"purpose": "watch build", "producer_hint": "demo-ci"}, **_tool_kwargs(registry, tmp_path)))
+    handle = registry.get_handle(created["listener"]["threadKey"])
+    assert handle is not None
+
+    safe_debug = _loads(
+        ath_generate_producer_handoff_tool(
+            {"thread_key": handle.thread_key, "mode": "debug_curl"},
+            **_tool_kwargs(registry, tmp_path),
+        )
+    )
+    assert safe_debug["debugCurl"]["requiresExplicitSensitiveOutput"] is True
+    assert safe_debug["debugCurl"]["containsRawSecret"] is False
+    assert handle.secret not in json.dumps(safe_debug, sort_keys=True)
+
+    invalid = _loads(
+        ath_generate_producer_handoff_tool(
+            {"thread_key": handle.thread_key, "mode": "generic_contract", "include_sensitive_secret": True},
+            **_tool_kwargs(registry, tmp_path),
+        )
+    )
+    assert invalid["ok"] is False
+    assert invalid["error"] == "invalid_request"
+
+    sensitive = _loads(
+        ath_generate_producer_handoff_tool(
+            {"thread_key": handle.thread_key, "mode": "debug_curl", "include_sensitive_secret": True},
+            **_tool_kwargs(registry, tmp_path),
+        )
+    )
+    assert sensitive["safety"]["rawSecretReturned"] is True
+    assert sensitive["debugCurl"]["sensitive"] is True
+    assert sensitive["debugCurl"]["rawSecret"] == handle.secret
+
+
+def test_generate_handoff_rejects_disabled_listener_without_recreating_secret(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    created = _loads(ath_create_listener_tool({"purpose": "watch build", "producer_hint": "demo-ci"}, **_tool_kwargs(registry, tmp_path)))
+    thread_key = created["listener"]["threadKey"]
+    secret_file = created["secret"]["secretFile"]
+    registry.set_enabled(thread_key, False)
+    os.unlink(secret_file)
+
+    result = _loads(
+        ath_generate_producer_handoff_tool(
+            {"thread_key": thread_key, "mode": "local_script"},
+            **_tool_kwargs(registry, tmp_path),
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "listener_disabled"
+    assert not os.path.exists(secret_file)
 
 
 def test_create_listener_tool_reuses_equivalent_active_listener(tmp_path):

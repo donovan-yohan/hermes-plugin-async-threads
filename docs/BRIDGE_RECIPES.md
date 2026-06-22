@@ -2,6 +2,19 @@
 
 This page collects producer-side patterns that are useful after `/ath listen` creates a signed route. The receiver still treats every event body as untrusted data; these recipes are about shaping safe state facts, not issuing instructions to Hermes.
 
+## Model-facing producer handoffs
+
+The model-facing `ath_generate_producer_handoff` tool turns an existing listener into a producer handoff without pasting the raw HMAC secret into normal chat/tool output. It can return:
+
+- a generic `async-thread-event/v1` contract;
+- local `producer_handoff.json` + `emit_async_thread_event.py` helper files;
+- a GitHub Actions recipe/step;
+- a debug emitter shape that only returns literal secret material behind an explicit sensitive flag.
+
+Default handoffs include endpoint URL, thread key, producer id, allowed event types, a schema-valid example event, `secretFile`/`contractFile` references, retry/de-dupe guidance, and listener lifecycle guidance. Local helper files are written under the configured handoff root with restrictive permissions and read the HMAC key from `ATH_SECRET_FILE`; they do not embed the raw secret.
+
+Use this path for the happy-case agent workflow: create/reuse a listener, generate a producer handoff, give the producer the helper file path or contract, then verify delivery with `ath_trace_event` or `/ath trace`.
+
 ## Sandbox-safe emit command
 
 For one-off producers or sandboxed worker lanes, prefer `/ath emit-command` over pasting secrets into prompts:

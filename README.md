@@ -106,7 +106,8 @@ See [`docs/SECURITY.md`](docs/SECURITY.md) for more detail.
 - compact long-running event rendering with `tailMode: none | compact | debug`;
 - optional debounce/coalescing for routine same-thread updates;
 - generic workflow-stage/candidate/evidence tracking with serial/parallel gate policy;
-- producer helper script for compact background-lane events.
+- producer helper script for compact background-lane events;
+- model-facing producer handoff generation for generic contracts, local emitter files, GitHub Actions recipes, and explicit debug emitters.
 
 ## Known limitations
 
