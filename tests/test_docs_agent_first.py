@@ -77,11 +77,11 @@ def test_public_docs_do_not_overclaim_hard_bounded_continuations():
     }
 
     forbidden = [
-        r"(?<!un)\bbounded agent continuation\b",
-        r"(?<!un)\bbounded agent run\b",
-        r"(?<!un)\bbounded prompt\b",
-        r"(?<!un)\bbounded text prompt\b",
-        r"(?<!un)\bbounded summarization\b",
+        r"\bbounded agent continuation\b",
+        r"\bbounded agent run\b",
+        r"\bbounded prompt\b",
+        r"\bbounded text prompt\b",
+        r"\bbounded summarization\b",
         r"\bbounded_continuation_policy\b",
         r"\bpolicy enforces max turns/toolsets/model\b",
     ]
