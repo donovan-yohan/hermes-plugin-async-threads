@@ -690,15 +690,17 @@ def _cmd_list(registry: Any, *, owner_user_id: str) -> str:
     handles = registry.list_handles(owner_user_id=owner_user_id)
     if not handles:
         return "no async-thread listeners for this user. create one with `/ath listen <producer>`."
+    displayed = handles[:20]
+    terminal_by_thread = registry.latest_terminal_events(thread_keys=[h.thread_key for h in displayed])
     lines = ["async-thread listeners:"]
-    for h in handles[:20]:
+    for h in displayed:
         state = "enabled" if h.enabled else "disabled"
         label = f" — {_display_text(h.label, 80)}" if h.label else ""
         thread = f" thread={_display_metadata(h.thread_id, 80)}" if h.thread_id else ""
         debounce = f" debounce={h.debounce_seconds}s" if h.debounce_seconds else ""
         workflow = f" workflow={_format_workflow_policy(h.workflow_policy)}" if h.workflow_policy.gate_order else ""
         lifecycle = f" lifecycle={_format_lifecycle_policy(h.lifecycle_policy)}"
-        terminal_event = registry.latest_terminal_event(thread_key=h.thread_key)
+        terminal_event = terminal_by_thread.get(h.thread_key)
         terminal = ""
         if terminal_event is not None:
             stale = h.enabled and terminal_event.detail.get("terminal_action") in {"warn_only", "shared_listener_kept_enabled"}

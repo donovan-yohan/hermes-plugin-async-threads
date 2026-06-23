@@ -876,3 +876,51 @@ async def test_shared_listener_ignores_auto_retire_on_terminal(tmp_path):
     assert terminal is not None
     assert terminal.detail["terminal_action"] == "shared_listener_kept_enabled"
     assert terminal.detail["terminal_retired"] is False
+
+def test_latest_terminal_event_not_lost_after_many_later_events(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    handle = registry.create_handle(source=_source().to_dict(), producer_id="release", owner_user_id="user-1")
+    registry.log_event(
+        producer_id="release",
+        event_id="terminal-1",
+        thread_key=handle.thread_key,
+        event_type="release.goal.finished",
+        outcome="delivered",
+        detail={"terminal_event": True, "terminal_action": "warn_only"},
+    )
+    for idx in range(60):
+        registry.log_event(
+            producer_id="release",
+            event_id=f"progress-{idx}",
+            thread_key=handle.thread_key,
+            event_type="release.progress",
+            outcome="delivered",
+            detail={"coalesced_count": idx},
+        )
+
+    terminal = registry.latest_terminal_event(thread_key=handle.thread_key)
+
+    assert terminal is not None
+    assert terminal.event_id == "terminal-1"
+    assert registry.list_stale_terminal_handles(owner_user_id="user-1")[0][0].thread_key == handle.thread_key
+
+
+def test_latest_terminal_events_batches_multiple_handles(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    first = registry.create_handle(source=_source().to_dict(), producer_id="release", owner_user_id="user-1")
+    second = registry.create_handle(source=_source().to_dict(), producer_id="deploy", owner_user_id="user-1")
+    for handle, producer in ((first, "release"), (second, "deploy")):
+        registry.log_event(
+            producer_id=producer,
+            event_id=f"{producer}-terminal",
+            thread_key=handle.thread_key,
+            event_type=f"{producer}.goal.finished",
+            outcome="delivered",
+            detail={"terminal_event": True, "terminal_action": "warn_only"},
+        )
+
+    terminal_by_thread = registry.latest_terminal_events(thread_keys=[first.thread_key, second.thread_key, first.thread_key])
+
+    assert set(terminal_by_thread) == {first.thread_key, second.thread_key}
+    assert terminal_by_thread[first.thread_key].event_id == "release-terminal"
+    assert terminal_by_thread[second.thread_key].event_id == "deploy-terminal"

@@ -34,11 +34,11 @@ class LifecyclePolicy:
     def from_mapping(cls, value: Mapping[str, Any] | None) -> "LifecyclePolicy":
         if not isinstance(value, Mapping):
             return cls()
-        terminal_event_types = _as_tuple(value.get("terminal_event_types") or value.get("terminalEventTypes"))
-        terminal_stages = _as_tuple(value.get("terminal_stages") or value.get("terminalStages"))
+        raw_types = _first_non_none(value, "terminal_event_types", "terminalEventTypes")
+        raw_stages = _first_non_none(value, "terminal_stages", "terminalStages")
         return cls(
-            terminal_event_types=terminal_event_types or DEFAULT_TERMINAL_EVENT_PATTERNS,
-            terminal_stages=terminal_stages or DEFAULT_TERMINAL_STAGES,
+            terminal_event_types=_as_tuple(raw_types) if raw_types is not None else DEFAULT_TERMINAL_EVENT_PATTERNS,
+            terminal_stages=_as_tuple(raw_stages) if raw_stages is not None else DEFAULT_TERMINAL_STAGES,
             auto_retire_on_terminal=bool(value.get("auto_retire_on_terminal", value.get("autoRetireOnTerminal", False))),
             shared_listener=bool(value.get("shared_listener", value.get("sharedListener", False))),
         )
@@ -108,6 +108,14 @@ def _terminal_stage_value(data: Mapping[str, Any]) -> str:
             if value:
                 return value
     return ""
+
+
+def _first_non_none(value: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        item = value.get(key)
+        if item is not None:
+            return item
+    return None
 
 
 def _as_tuple(value: Any) -> tuple[str, ...]:

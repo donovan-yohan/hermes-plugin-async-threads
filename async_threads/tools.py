@@ -263,10 +263,21 @@ def ath_list_listeners_tool(args: dict[str, Any], **kwargs: Any) -> str:
     listeners = registry.list_handles(owner_user_id=origin.owner_user_id, include_disabled=include_disabled)
     if current_only:
         listeners = [handle for handle in listeners if _same_origin(handle, origin)]
+    terminal_by_thread = registry.latest_terminal_events(thread_keys=[handle.thread_key for handle in listeners])
     return _json(
         {
             "ok": True,
-            "listeners": [_handle_summary_with_terminal(registry, handle, event_url=_event_url(config), secret_root=secret_root_from_config(config), ensure_secret_ref=False) for handle in listeners],
+            "listeners": [
+                _handle_summary_with_terminal(
+                    registry,
+                    handle,
+                    event_url=_event_url(config),
+                    secret_root=secret_root_from_config(config),
+                    ensure_secret_ref=False,
+                    terminal_event=terminal_by_thread.get(handle.thread_key),
+                )
+                for handle in listeners
+            ],
             "count": len(listeners),
         }
     )
@@ -536,9 +547,10 @@ def _handle_summary_with_terminal(
     event_url: str = "",
     secret_root: Any | None = None,
     ensure_secret_ref: bool = False,
+    terminal_event: Any | None = None,
 ) -> dict[str, Any]:
     summary = _handle_summary(handle, event_url=event_url, secret_root=secret_root, ensure_secret_ref=ensure_secret_ref)
-    terminal = registry.latest_terminal_event(thread_key=handle.thread_key)
+    terminal = terminal_event if terminal_event is not None else registry.latest_terminal_event(thread_key=handle.thread_key)
     if terminal is not None:
         summary["terminalState"] = {
             "eventId": terminal.event_id,

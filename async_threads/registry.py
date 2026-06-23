@@ -693,15 +693,37 @@ class AsyncThreadRegistry:
             return int(conn.execute(sql, params).fetchone()[0])
 
     def latest_terminal_event(self, *, thread_key: str) -> AsyncThreadEventLog | None:
-        for event in self.list_recent_events(thread_key=thread_key, limit=50):
-            if event.detail.get("terminal_event") is True:
-                return event
-        return None
+        return self.latest_terminal_events(thread_keys=[thread_key]).get(thread_key)
+
+    def latest_terminal_events(self, *, thread_keys: Iterable[str]) -> dict[str, AsyncThreadEventLog]:
+        keys = [str(key) for key in dict.fromkeys(thread_keys) if str(key)]
+        if not keys:
+            return {}
+        placeholders = ",".join("?" for _ in keys)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                select e.*
+                from event_log e
+                join (
+                    select thread_key, max(id) as latest_id
+                    from event_log
+                    where thread_key in ({placeholders})
+                      and detail_json like '%"terminal_event":true%'
+                    group by thread_key
+                ) latest on latest.latest_id = e.id
+                order by e.id desc
+                """,
+                keys,
+            ).fetchall()
+        return {str(row["thread_key"]): _row_to_event(row) for row in rows}
 
     def list_stale_terminal_handles(self, *, owner_user_id: str | None = None) -> list[tuple[AsyncThreadHandle, AsyncThreadEventLog]]:
+        handles = self.list_handles(owner_user_id=owner_user_id, include_disabled=False)
+        terminal_by_thread = self.latest_terminal_events(thread_keys=[handle.thread_key for handle in handles])
         stale: list[tuple[AsyncThreadHandle, AsyncThreadEventLog]] = []
-        for handle in self.list_handles(owner_user_id=owner_user_id, include_disabled=False):
-            event = self.latest_terminal_event(thread_key=handle.thread_key)
+        for handle in handles:
+            event = terminal_by_thread.get(handle.thread_key)
             if event is None:
                 continue
             if event.detail.get("terminal_action") in {"warn_only", "shared_listener_kept_enabled"}:
