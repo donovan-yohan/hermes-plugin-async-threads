@@ -71,6 +71,25 @@ def test_ath_finalizer_retires_enabled_listener_and_removes_secret(tmp_path):
     assert handle.secret not in str(result)
 
 
+def test_ath_finalizer_preserves_secret_artifacts_when_disable_fails(tmp_path, monkeypatch):
+    registry = _registry(tmp_path)
+    handle = _handle(registry)
+    artifact = write_secret_artifact(handle, root=tmp_path / "secrets")
+    adapter = AthFinalizerAdapter(registry=registry, secret_root=tmp_path / "secrets")
+
+    monkeypatch.setattr(registry, "set_enabled", lambda thread_key, enabled: False)
+    result = adapter.retire_listener(_context(handle.thread_key))
+
+    assert result["ok"] is False
+    assert "could not be retired" in result["error"]
+    assert result["evidence"][0]["retired"] is False
+    assert result["evidence"][0]["enabledAfter"] is True
+    assert result["evidence"][0]["secretMaterialRemoved"] is False
+    assert artifact.secret_file.exists()
+    assert artifact.contract_file.exists()
+    assert _enabled(registry, handle.thread_key) is True
+
+
 def test_ath_finalizer_is_idempotent_for_already_disabled_or_absent_listener(tmp_path):
     registry = _registry(tmp_path)
     handle = _handle(registry)
