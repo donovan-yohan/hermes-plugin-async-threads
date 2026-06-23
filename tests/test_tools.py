@@ -14,6 +14,7 @@ from jsonschema import validate
 from async_threads.adapter import AsyncThreadsAdapter
 from async_threads.plugin import register
 from async_threads.registry import AsyncThreadRegistry
+from async_threads.security import validate_timestamp
 from async_threads.tools import (
     ath_create_listener_tool,
     ath_generate_producer_handoff_tool,
@@ -368,13 +369,15 @@ def test_generate_producer_handoff_generic_contract_is_schema_valid_and_secret_s
         )
     )
 
-    schema = json.load(open("docs/schemas/async-thread-event-v1.schema.json", encoding="utf-8"))
+    with open("docs/schemas/async-thread-event-v1.schema.json", encoding="utf-8") as fp:
+        schema = json.load(fp)
     validate(instance=handoff["exampleEvent"], schema=schema)
     rendered = json.dumps(handoff, sort_keys=True)
     assert handoff["ok"] is True
     assert handoff["mode"] == "generic_contract"
     assert handoff["producerId"] == "demo-ci"
     assert handoff["defaultEventType"] == "demo-ci.finished"
+    validate_timestamp(handoff["exampleEvent"]["occurredAt"])
     assert handoff["contract"]["secretFile"] == created["secret"]["secretFile"]
     assert handoff["retryDeduping"]["reuseEventIdOnRetry"] is True
     assert handoff["safety"]["eventPayloadsAreUntrustedData"] is True
@@ -451,6 +454,83 @@ async def test_generate_local_script_handoff_files_emit_signed_event_and_dedupe(
     outcomes = [event.outcome for event in registry.list_recent_events(thread_key=handle.thread_key, limit=5)]
     assert "direct_delivered" in outcomes
     assert "duplicate" in outcomes
+
+
+def test_generate_dynamic_workflows_handoff_includes_loop_recipe_without_raw_secret(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    created = _loads(
+        ath_create_listener_tool(
+            {
+                "purpose": "watch loop",
+                "producer_hint": "dynamic-workflows",
+                "event_types": ["loop.started", "loop.waiting_for_event", "loop.step_completed", "loop.converged", "loop.halted"],
+                "terminal_event_types": ["loop.converged", "loop.halted"],
+                "shared_listener": True,
+            },
+            **_tool_kwargs(registry, tmp_path),
+        )
+    )
+    handle = registry.get_handle(created["listener"]["threadKey"])
+    assert handle is not None
+
+    handoff = _loads(
+        ath_generate_producer_handoff_tool(
+            {"thread_key": handle.thread_key, "mode": "dynamic_workflows"},
+            **_tool_kwargs(registry, tmp_path),
+        )
+    )
+
+    with open("docs/schemas/async-thread-event-v1.schema.json", encoding="utf-8") as fp:
+        schema = json.load(fp)
+    rendered = json.dumps(handoff, sort_keys=True)
+    recipe = handoff["dynamicWorkflows"]
+    assert handoff["mode"] == "dynamic_workflows"
+    assert handle.secret not in rendered
+    validate_timestamp(handoff["exampleEvent"]["occurredAt"])
+    assert recipe["env"]["ATH_SECRET_FILE"] == created["secret"]["secretFile"]
+    assert recipe["env"]["ATH_CONTRACT_FILE"] == created["secret"]["contractFile"]
+    assert recipe["secretHandling"].startswith("Read ATH_SECRET_FILE")
+    assert "Dynamic Workflows decides loop state transitions" in recipe["controllerBoundary"]
+    assert "current UTC emission time" in recipe["timestampHandling"]
+    assert "cron spam" in recipe["waitingWithoutPolling"]
+    assert recipe["sequence"] == ["loop.started", "loop.waiting_for_event", "external signal wakes controller", "loop.step_completed", "loop.converged or loop.halted"]
+    assert recipe["recommendedListener"]["terminal_event_types"] == ["loop.converged", "loop.halted"]
+    assert recipe["listenerCompatibility"]["canEmitExamples"] is True
+    assert recipe["listenerCompatibility"]["missingRequiredEventTypes"] == []
+    event_types = {example["eventType"] for example in recipe["examples"]}
+    assert {"loop.started", "loop.waiting_for_event", "loop.step_completed", "loop.converged", "loop.halted"}.issubset(event_types)
+    for example in recipe["examples"]:
+        validate(instance=example, schema=schema)
+        validate_timestamp(example["occurredAt"])
+        assert example["asyncThread"]["threadKey"] == handle.thread_key
+        assert example["producer"]["id"] == "dynamic-workflows"
+        assert "correlationKey" in example["correlation"]
+        assert "idempotencyKey" in example["correlation"]
+        assert "signalKey" in example["correlation"]
+
+
+def test_generate_dynamic_workflows_handoff_warns_on_incompatible_listener_allowlist(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    created = _loads(
+        ath_create_listener_tool(
+            {"purpose": "watch build", "producer_hint": "demo-ci", "event_types": ["demo-ci.finished"]},
+            **_tool_kwargs(registry, tmp_path),
+        )
+    )
+    handle = registry.get_handle(created["listener"]["threadKey"])
+    assert handle is not None
+
+    handoff = _loads(
+        ath_generate_producer_handoff_tool(
+            {"thread_key": handle.thread_key, "mode": "dynamic_workflows"},
+            **_tool_kwargs(registry, tmp_path),
+        )
+    )
+
+    compatibility = handoff["dynamicWorkflows"]["listenerCompatibility"]
+    assert compatibility["canEmitExamples"] is False
+    assert set(compatibility["missingRequiredEventTypes"]) == {"loop.started", "loop.waiting_for_event", "loop.step_completed", "loop.converged", "loop.halted"}
+    assert "will be rejected" in compatibility["warning"]
 
 
 def test_generate_handoff_github_actions_includes_recipe_and_helper_file(tmp_path):

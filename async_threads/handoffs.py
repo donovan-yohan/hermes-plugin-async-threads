@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,8 @@ from .secrets import describe_secret_artifact
 
 
 HANDOFF_VERSION = "async-thread-producer-handoff/v1"
+DYNAMIC_WORKFLOW_EVENT_TYPES = ["loop.started", "loop.waiting_for_event", "loop.step_completed", "loop.converged", "loop.halted"]
+DYNAMIC_WORKFLOW_OPTIONAL_EVENT_TYPES = ["loop.waiting_for_approval", "loop.stalled"]
 
 
 def build_producer_handoff(
@@ -57,7 +60,9 @@ def build_producer_handoff(
         },
     }
 
-    if normalized_mode == "github_actions":
+    if normalized_mode == "dynamic_workflows":
+        payload["dynamicWorkflows"] = _dynamic_workflows_recipe(handle, event_url=event_url, secret_ref=secret_ref)
+    elif normalized_mode == "github_actions":
         payload["githubActions"] = _github_actions_recipe(handle, event_url=event_url, event_type=default_event_type, secret_ref=secret_ref)
     elif normalized_mode == "local_script":
         payload["localScript"] = _local_script_recipe(secret_ref=secret_ref)
@@ -165,11 +170,14 @@ def _normalize_mode(value: str) -> str:
         "ci": "github_actions",
         "github": "github_actions",
         "github_action": "github_actions",
+        "dynamic_workflow": "dynamic_workflows",
+        "dynamic_workflows": "dynamic_workflows",
+        "dw": "dynamic_workflows",
         "curl": "debug_curl",
         "debug": "debug_curl",
     }
     mode = aliases.get(mode, mode)
-    return mode if mode in {"generic_contract", "local_script", "github_actions", "debug_curl"} else "generic_contract"
+    return mode if mode in {"generic_contract", "local_script", "github_actions", "debug_curl", "dynamic_workflows"} else "generic_contract"
 
 
 def _select_event_type(handle: AsyncThreadHandle, requested: str) -> str:
@@ -187,7 +195,7 @@ def _minimal_event(handle: AsyncThreadHandle, *, event_type: str) -> dict[str, A
         "eventId": f"{handle.producer_id}-example-001",
         "eventType": event_type,
         "producer": {"id": handle.producer_id},
-        "occurredAt": "2026-06-22T00:00:00Z",
+        "occurredAt": _utc_now_iso(),
         "asyncThread": {"threadKey": handle.thread_key},
         "summary": f"{event_type} completed",
         "tailMode": "compact",
@@ -247,6 +255,143 @@ def _generic_contract_recipe() -> dict[str, Any]:
             "Keep payload compact and treat all producer fields as untrusted data.",
         ],
     }
+
+
+def _dynamic_workflows_recipe(handle: AsyncThreadHandle, *, event_url: str, secret_ref: dict[str, Any]) -> dict[str, Any]:
+    run_id = "run-42"
+    spec_id = "example-loop"
+    head = "a1b2c3d4"
+    occurred_at = _utc_now_iso()
+    compatibility = _dynamic_workflows_listener_compatibility(handle)
+    base = {
+        "version": "async-thread-event/v1",
+        "producer": {"id": handle.producer_id},
+        "occurredAt": occurred_at,
+        "asyncThread": {"threadKey": handle.thread_key},
+        "tailMode": "none",
+        "workflowId": f"loop:{spec_id}:{run_id}",
+        "seriesKey": f"loop:{spec_id}:{run_id}",
+        "loop": {"runId": run_id, "specId": spec_id, "specName": "Example loop"},
+        "refs": {"repo": "example/repo", "pullRequest": 37, "headSha": head},
+    }
+    examples = [
+        base
+        | {
+            "eventId": "loop-run-42-started",
+            "eventType": "loop.started",
+            "summary": "example loop started",
+            "stage": "started",
+            "loop": base["loop"] | {"state": "running"},
+            "correlation": {
+                "correlationKey": f"{spec_id}:{run_id}:head-{head}",
+                "idempotencyKey": "loop-run-42-started",
+                "signalKey": f"loop.started:{spec_id}:{run_id}",
+            },
+            "nextExpectedSignal": {"signalKey": f"github.check_suite.completed:example/repo:37:{head}", "deadlineAt": "2026-06-23T17:15:00Z"},
+        },
+        base
+        | {
+            "eventId": "loop-run-42-waiting-checks",
+            "eventType": "loop.waiting_for_event",
+            "summary": "waiting for GitHub checks for PR 37",
+            "stage": "blocked",
+            "loop": base["loop"] | {"state": "waiting"},
+            "correlation": {
+                "correlationKey": f"{spec_id}:{run_id}:checks:{head}",
+                "idempotencyKey": "loop-run-42-waiting-checks",
+                "signalKey": f"github.check_suite.completed:example/repo:37:{head}",
+            },
+            "nextExpectedSignal": {"signalKey": f"github.check_suite.completed:example/repo:37:{head}", "deadlineAt": "2026-06-23T17:30:00Z"},
+        },
+        base
+        | {
+            "eventId": "loop-run-42-step-review-completed",
+            "eventType": "loop.step_completed",
+            "summary": "review step passed for PR 37",
+            "stage": "review_passed",
+            "loop": base["loop"] | {"state": "running"},
+            "step": {"stepId": "review", "attempt": 1, "backend": "relay"},
+            "correlation": {
+                "correlationKey": f"{spec_id}:{run_id}:review:{head}",
+                "idempotencyKey": "loop-run-42-step-review-completed",
+                "signalKey": "relay.session.completed:run-42:review",
+            },
+            "evidence": {"kind": "review", "status": "passed", "url": "https://example.invalid/reviews/1"},
+            "nextExpectedSignal": {"signalKey": f"approval.merge.requested:example/repo:37:{head}"},
+        },
+        base
+        | {
+            "eventId": "loop-run-42-converged",
+            "eventType": "loop.converged",
+            "summary": "example loop converged",
+            "stage": "released",
+            "loop": base["loop"] | {"state": "converged"},
+            "correlation": {
+                "correlationKey": f"{spec_id}:{run_id}:converged:{head}",
+                "idempotencyKey": "loop-run-42-converged",
+                "signalKey": f"loop.converged:{spec_id}:{run_id}",
+            },
+            "evidence": {"kind": "release_gate", "status": "passed", "url": "https://example.invalid/repo/pull/37"},
+            "nextExpectedSignal": {"signalKey": "none", "reason": "loop converged"},
+        },
+        base
+        | {
+            "eventId": "loop-run-42-halted",
+            "eventType": "loop.halted",
+            "summary": "example loop halted after stale approval",
+            "stage": "cancelled",
+            "loop": base["loop"] | {"state": "halted"},
+            "correlation": {
+                "correlationKey": f"{spec_id}:{run_id}:halted:{head}",
+                "idempotencyKey": "loop-run-42-halted",
+                "signalKey": f"loop.halted:{spec_id}:{run_id}",
+            },
+            "evidence": {"kind": "brake", "status": "failed", "url": "https://example.invalid/loops/run-42"},
+            "nextExpectedSignal": {"signalKey": "human.next_step", "reason": "inspect stale approval"},
+        },
+    ]
+    return {
+        "useWhen": "Dynamic Workflows needs to emit signed ATH loop lifecycle events for a mapped conversation",
+        "endpoint": event_url,
+        "env": {
+            "ATH_SECRET_FILE": secret_ref.get("secretFile", ""),
+            "ATH_CONTRACT_FILE": secret_ref.get("contractFile", ""),
+            "ATH_THREAD_KEY": handle.thread_key,
+            "ATH_PRODUCER_ID": handle.producer_id,
+        },
+        "recommendedListener": {
+            "producer_hint": handle.producer_id,
+            "event_types": DYNAMIC_WORKFLOW_EVENT_TYPES + DYNAMIC_WORKFLOW_OPTIONAL_EVENT_TYPES,
+            "terminal_event_types": ["loop.converged", "loop.halted"],
+            "auto_retire_on_terminal": False,
+            "shared_listener": True,
+        },
+        "listenerCompatibility": compatibility,
+        "sequence": ["loop.started", "loop.waiting_for_event", "external signal wakes controller", "loop.step_completed", "loop.converged or loop.halted"],
+        "controllerBoundary": "Dynamic Workflows decides loop state transitions; ATH only authenticates, de-dupes, wakes, replies, renders, and records events.",
+        "timestampHandling": "Set occurredAt to the current UTC emission time immediately before signing; events outside the replay window are rejected.",
+        "waitingWithoutPolling": "Emit loop.waiting_for_event with nextExpectedSignal/deadline; let external signed producers or bounded timeout signals wake the controller instead of cron spam.",
+        "secretHandling": "Read ATH_SECRET_FILE locally or from a secret manager; ordinary handoff output never includes the raw HMAC secret.",
+        "examples": examples,
+    }
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _dynamic_workflows_listener_compatibility(handle: AsyncThreadHandle) -> dict[str, Any]:
+    allowed = list(handle.allowed_event_types)
+    missing = [event_type for event_type in DYNAMIC_WORKFLOW_EVENT_TYPES if allowed and event_type not in allowed]
+    result: dict[str, Any] = {
+        "requiredEventTypes": list(DYNAMIC_WORKFLOW_EVENT_TYPES),
+        "allowedEventTypes": allowed,
+        "missingRequiredEventTypes": missing,
+        "canEmitExamples": not missing,
+    }
+    if missing:
+        result["warning"] = "listener allowlist is missing Dynamic Workflows loop event types; emitted examples with those eventType values will be rejected until the listener is recreated or reused with the recommended allowlist"
+    return result
 
 
 def _local_script_recipe(*, secret_ref: dict[str, Any]) -> dict[str, Any]:
