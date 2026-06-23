@@ -91,14 +91,14 @@ _ROTATE_SCHEMA = {
 
 _HANDOFF_SCHEMA = {
     "name": "ath_generate_producer_handoff",
-    "description": "Generate a safe producer handoff for an existing listener: contract, local emitter files, GitHub Actions recipe, or debug curl-like emitter. Raw secrets are not returned unless explicitly requested for debug output.",
+    "description": "Generate a safe producer handoff for an existing listener: contract, local emitter files, GitHub Actions recipe, Dynamic Workflows loop recipe, or debug curl-like emitter. Raw secrets are not returned unless explicitly requested for debug output.",
     "parameters": {
         "type": "object",
         "properties": {
             "thread_key": {"type": "string", "description": "ATH listener thread key."},
             "mode": {
                 "type": "string",
-                "enum": ["generic_contract", "local_script", "github_actions", "debug_curl"],
+                "enum": ["generic_contract", "local_script", "github_actions", "debug_curl", "dynamic_workflows"],
                 "description": "Handoff shape. Default generic_contract.",
             },
             "event_type": {"type": "string", "description": "Optional allowed event type to use in examples. Defaults to the first listener event type."},

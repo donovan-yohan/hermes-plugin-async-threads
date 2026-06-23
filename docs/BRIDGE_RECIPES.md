@@ -123,6 +123,24 @@ The command prints a shell/Python template with the receiver URL, thread key, pr
 
 This is safer than giving a worker direct SQLite access. If the emit fails, the generated script exits with an HTTP/transport error that the worker can report as blocked.
 
+## Dynamic Workflows loop emitter
+
+Use this when Dynamic Workflows is the controller and ATH is only the signal/visibility surface. Create or reuse a listener with a narrow allowlist such as `loop.started`, `loop.waiting_for_event`, `loop.step_completed`, `loop.waiting_for_approval`, `loop.stalled`, `loop.halted`, and `loop.converged`, then generate a handoff with `mode: dynamic_workflows`.
+
+If you generate the handoff from an existing listener whose allowlist is missing the core loop events, treat `listenerCompatibility.warning` as a blocker and recreate/reuse a listener with the recommended event types. Otherwise signed loop examples can be perfectly formed but still rejected by ATH authorization.
+
+The handoff gives Dynamic Workflows endpoint URL, `ATH_THREAD_KEY`, `ATH_PRODUCER_ID`, `ATH_CONTRACT_FILE`, and `ATH_SECRET_FILE` references. It never returns the raw HMAC secret in ordinary output. The controller should read the secret from the file or its own secret manager, set `occurredAt` to the current UTC emission time, build the JSON body once, sign the exact UTF-8 bytes, and reuse the same `eventId` on retry. Do not sign stale copied JSON; receiver replay protection rejects events outside the freshness window.
+
+Copy/paste sequence:
+
+1. emit `loop.started` with `loop.runId`, `loop.specId`, `correlation.correlationKey`, `correlation.idempotencyKey`, `correlation.signalKey`, `refs`, `evidence`, and `nextExpectedSignal`;
+2. emit `loop.waiting_for_event` when the controller parks for GitHub/Relay/external state;
+3. let the external signed producer emit the matching signal; ATH wakes/renders but Dynamic Workflows verifies live state and decides the next transition;
+4. emit `loop.step_completed` with compact evidence handles after a bounded step;
+5. emit either `loop.converged` or `loop.halted` as the terminal loop result, then stop the producer loop for single-goal runs.
+
+ATH does not decide convergence, retry, halt, or approval. Dynamic Workflows owns those state transitions. ATH authenticates, de-dupes, wakes, replies, renders, and records events. Public comments and producer payload text remain untrusted data.
+
 ## Task-board-to-ATH bridge recipe
 
 Use this shape when a durable task board already records task events and you want material transitions to wake the original Hermes thread.
