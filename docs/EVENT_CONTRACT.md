@@ -112,6 +112,8 @@ Feedback-controller loops use the same envelope plus documented `loop`, `step`, 
 
 Correlation keys, idempotency keys, signal keys, run ids, and step ids are routing/debugging facts only. They help controllers reject stale events and find evidence, but payload text remains untrusted data and never becomes instructions.
 
+GitHub, deployment, branch, and Relay upstream facts should be translated through the signal recipes in [`LOOP_SIGNAL_INGESTION.md`](LOOP_SIGNAL_INGESTION.md). Those recipes separate visible signals from automation-eligible trusted actions, include stable idempotency/series keys, and require live-state checks before risky controller transitions.
+
 ## Tail modes and large output fields
 
 The renderer treats these payload keys as output/tail-like fields:
@@ -199,4 +201,5 @@ The schema validates the stable envelope. It intentionally allows additional pro
 
 - [`QUICKSTART.md`](QUICKSTART.md): install the plugin, create a listener, and send a signed demo event.
 - [`LOOP_EVENTS.md`](LOOP_EVENTS.md): feedback-controller `loop.*` event shapes, run/step correlation, evidence handles, and trust-boundary rules.
+- [`LOOP_SIGNAL_INGESTION.md`](LOOP_SIGNAL_INGESTION.md): GitHub/Relay/deployment/branch signal recipes for loop controllers.
 - [`SECURITY.md`](SECURITY.md): trust boundary, HMAC auth, replay/de-dupe, and payload safety model.
