@@ -113,6 +113,22 @@ def test_normalize_workflow_event_ignores_non_mapping_payloads():
     assert normalize_workflow_event("not-json-object", {"event_id": "evt", "event_type": "job.progress"}) is None
 
 
+def test_normalize_workflow_event_derives_artifact_from_refs_head_sha():
+    event = normalize_workflow_event(
+        {
+            "workflowId": "loop:release-readiness:run-42",
+            "stage": "needs_attention",
+            "refs": {"repo": "example/repo", "pullRequest": 86, "headSha": "a1b2c3d4"},
+            "evidence": {"kind": "approval", "status": "passed"},
+        },
+        {"event_id": "evt", "event_type": "loop.approval_granted", "summary": "approved"},
+    )
+
+    assert event is not None
+    assert event["artifact"] == {"kind": "git_commit", "id": "a1b2c3d4"}
+    assert event["artifact_fingerprint"]
+
+
 def test_workflow_state_tracks_candidate_gates_and_stale_evidence(tmp_path: Path):
     reg = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
     handle = reg.create_handle(
@@ -178,6 +194,107 @@ def test_workflow_state_tracks_candidate_gates_and_stale_evidence(tmp_path: Path
     assert reg.count_workflow_states(owner_user_id="u1") == 1
     [listed] = reg.list_workflow_states(owner_user_id="u1")
     assert listed.workflow_id == "wf-feature-1"
+
+
+def test_workflow_state_marks_approval_evidence_stale_after_artifact_change(tmp_path: Path):
+    reg = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    handle = reg.create_handle(
+        source={"platform": "discord", "chat_id": "c", "thread_id": "t", "chat_type": "channel"},
+        producer_id="approval-bridge",
+        owner_user_id="u1",
+        workflow_policy=WorkflowPolicy(gate_order=("approval",), stale_on_artifact_change=("approval",)),
+    )
+
+    approved = reg.update_workflow_state_from_event(
+        handle=handle,
+        fields={
+            "event_id": "approval-merge-run-42-head-a1b2c3d4-approved",
+            "event_type": "loop.approval_granted",
+            "producer_id": "approval-bridge",
+            "thread_key": handle.thread_key,
+            "summary": "approval granted",
+        },
+        data={
+            "workflowId": "loop:release-readiness:run-42",
+            "stage": "needs_attention",
+            "artifact": {"kind": "git_commit", "id": "a1b2c3d4"},
+            "evidence": {"kind": "approval", "status": "passed", "summary": "trusted maintainer approved current head"},
+        },
+    )
+    moved = reg.update_workflow_state_from_event(
+        handle=handle,
+        fields={
+            "event_id": "github-pr-86-head-bbbb2222",
+            "event_type": "github.pr.head_changed",
+            "producer_id": "approval-bridge",
+            "thread_key": handle.thread_key,
+            "summary": "head changed",
+        },
+        data={
+            "workflowId": "loop:release-readiness:run-42",
+            "stage": "progress",
+            "artifact": {"kind": "git_commit", "id": "bbbb2222"},
+        },
+    )
+
+    assert approved is not None
+    assert approved.evidence["approval"]["status"] == "passed"
+    assert moved is not None
+    assert moved.artifact["id"] == "bbbb2222"
+    assert moved.evidence["approval"]["status"] == "stale"
+    assert moved.evidence["approval"]["stale_reason"] == "artifact_changed"
+
+
+def test_late_old_head_approval_is_recorded_stale_not_passed(tmp_path: Path):
+    reg = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    handle = reg.create_handle(
+        source={"platform": "discord", "chat_id": "c", "thread_id": "t", "chat_type": "channel"},
+        producer_id="approval-bridge",
+        owner_user_id="u1",
+        workflow_policy=WorkflowPolicy(gate_order=("approval",), stale_on_artifact_change=("approval",)),
+    )
+
+    current = reg.update_workflow_state_from_event(
+        handle=handle,
+        fields={
+            "event_id": "github-pr-86-head-bbbb2222",
+            "event_type": "github.pr.head_changed",
+            "producer_id": "approval-bridge",
+            "thread_key": handle.thread_key,
+            "summary": "head changed",
+        },
+        data={
+            "workflowId": "loop:release-readiness:run-42",
+            "stage": "progress",
+            "artifact": {"kind": "git_commit", "id": "bbbb2222"},
+        },
+    )
+    old_approval = reg.update_workflow_state_from_event(
+        handle=handle,
+        fields={
+            "event_id": "approval-merge-run-42-head-a1b2c3d4-approved",
+            "event_type": "loop.approval_granted",
+            "producer_id": "approval-bridge",
+            "thread_key": handle.thread_key,
+            "summary": "old approval granted",
+        },
+        data={
+            "workflowId": "loop:release-readiness:run-42",
+            "stage": "needs_attention",
+            "refs": {"repo": "example/repo", "pullRequest": 86, "headSha": "a1b2c3d4"},
+            "evidence": {"kind": "approval", "status": "passed", "summary": "trusted maintainer approved old head"},
+        },
+    )
+
+    assert current is not None
+    assert current.artifact == {"kind": "git_commit", "id": "bbbb2222"}
+    assert old_approval is not None
+    assert old_approval.stage == "progress"
+    assert old_approval.artifact == {"kind": "git_commit", "id": "bbbb2222"}
+    assert old_approval.evidence["approval"]["status"] == "stale"
+    assert old_approval.evidence["approval"]["previous_status"] == "passed"
+    assert old_approval.evidence["approval"]["stale_reason"] == "artifact_changed"
+    assert old_approval.gates["states"]["approval"]["state"] == "stale"
 
 
 def test_parallel_workflow_gates_activate_independently(tmp_path: Path):

@@ -101,6 +101,8 @@ def normalize_workflow_event(data: Any, fields: Mapping[str, str]) -> dict[str, 
         )
     )
     artifact = _clean_object(data.get("artifact") or _get(data, "payload.artifact") or _get(data, "subject.artifact"))
+    if not artifact:
+        artifact = _artifact_from_refs(data.get("refs"))
     candidate = _clean_object(data.get("candidate") or _get(data, "payload.candidate") or _get(data, "subject.candidate"))
     evidence = _clean_evidence(data.get("evidence") or _get(data, "payload.evidence"))
     return {
@@ -127,18 +129,28 @@ def apply_workflow_transition(
     artifact = event.get("artifact") or (previous.get("artifact") if previous else {}) or {}
     artifact_fingerprint = event.get("artifact_fingerprint") or (previous.get("artifact_fingerprint") if previous else "") or ""
     previous_artifact_fingerprint = str(previous.get("artifact_fingerprint") or "") if previous else ""
-    if artifact_fingerprint and previous_artifact_fingerprint and artifact_fingerprint != previous_artifact_fingerprint:
+    artifact_changed = bool(artifact_fingerprint and previous_artifact_fingerprint and artifact_fingerprint != previous_artifact_fingerprint)
+    if artifact_changed:
         evidence = _mark_stale_evidence(
             evidence,
             stale_gates=policy.stale_on_artifact_change,
             now=now,
         )
     incoming_evidence = event.get("evidence")
+    preserve_previous_state_for_stale_incoming = False
     if isinstance(incoming_evidence, Mapping):
         kind = _clean_gate_name(incoming_evidence.get("kind"))
         if kind:
+            incoming = dict(incoming_evidence)
+            if artifact_changed and _evidence_stales_on_artifact_change(kind, policy):
+                if str(incoming.get("status") or "") == PASSED_EVIDENCE_STATUS:
+                    incoming["previous_status"] = incoming.get("status")
+                    incoming["status"] = "stale"
+                    incoming["stale_reason"] = "artifact_changed"
+                    incoming["stale_at"] = now
+                    preserve_previous_state_for_stale_incoming = previous is not None
             evidence[kind] = {
-                **dict(incoming_evidence),
+                **incoming,
                 "kind": kind,
                 "artifact_fingerprint": artifact_fingerprint,
                 "updated_at": now,
@@ -148,6 +160,10 @@ def apply_workflow_transition(
     previous_stage = str(previous.get("stage") or "") if previous else ""
     if previous_stage in TERMINAL_STAGE_VALUES and stage not in TERMINAL_STAGE_VALUES:
         stage = previous_stage
+    elif preserve_previous_state_for_stale_incoming:
+        stage = previous_stage
+        artifact = (previous or {}).get("artifact") or {}
+        artifact_fingerprint = previous_artifact_fingerprint
     gates = compute_gates(policy=policy, evidence=evidence, candidate=candidate)
     return {
         "workflow_id": str(event["workflow_id"]),
@@ -264,6 +280,23 @@ def _clean_evidence(value: Any) -> dict[str, Any]:
     cleaned["kind"] = kind
     cleaned["status"] = status
     return cleaned
+
+
+def _artifact_from_refs(value: Any) -> dict[str, Any]:
+    refs = _clean_object(value)
+    if not refs:
+        return {}
+    head_sha = _first_string(refs.get("headSha"), refs.get("head_sha"), refs.get("commitSha"), refs.get("sha"))
+    if head_sha:
+        return {"kind": "git_commit", "id": head_sha}
+    revision = _first_string(refs.get("artifactRevision"), refs.get("artifact_revision"), refs.get("revision"))
+    if revision:
+        return {"kind": "artifact_revision", "id": revision}
+    return {}
+
+
+def _evidence_stales_on_artifact_change(kind: str, policy: WorkflowPolicy) -> bool:
+    return "all" in policy.stale_on_artifact_change or kind in policy.stale_on_artifact_change
 
 
 def _normalize_stage(value: str) -> str:

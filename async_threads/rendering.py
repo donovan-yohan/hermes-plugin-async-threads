@@ -35,11 +35,23 @@ _LOOP_HEADINGS = {
     "loop.step_completed": "Loop step completed",
     "loop.waiting_for_event": "Loop waiting for event",
     "loop.waiting_for_approval": "Loop waiting for approval",
+    "loop.approval_granted": "Loop approval granted",
+    "loop.approval_denied": "Loop approval denied",
+    "loop.approval_stale": "Loop approval stale",
     "loop.stalled": "Loop stalled",
     "loop.halted": "Loop halted",
     "loop.converged": "Loop converged",
 }
-_LOOP_PRIORITY_EVENTS = {"loop.sensor_failed", "loop.waiting_for_approval", "loop.stalled", "loop.halted", "loop.converged"}
+_LOOP_PRIORITY_EVENTS = {
+    "loop.sensor_failed",
+    "loop.waiting_for_approval",
+    "loop.approval_granted",
+    "loop.approval_denied",
+    "loop.approval_stale",
+    "loop.stalled",
+    "loop.halted",
+    "loop.converged",
+}
 
 
 def render_event_message(data: Any, *, event_type: str, producer_id: str, summary: str) -> str:

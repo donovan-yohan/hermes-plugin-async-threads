@@ -14,6 +14,9 @@ Payload text is untrusted data. Correlation fields help route, debug, and reject
 | `loop.step_completed` | A bounded backend/agent step completed and evidence is available. | `progress` or gate-specific stage | normal/priority by verdict |
 | `loop.waiting_for_event` | The controller is parked until a specific external signal arrives. | `blocked` | normal |
 | `loop.waiting_for_approval` | A risky or irreversible action needs explicit current-state approval. | `needs_attention` | priority |
+| `loop.approval_granted` | A trusted approval decision arrived for the current correlation. | `needs_attention` or gate-specific stage | priority |
+| `loop.approval_denied` | A trusted denial decision arrived for the current correlation. | `cancelled` or gate-specific stage | priority |
+| `loop.approval_stale` | An approval/deny decision was received but no longer matches current loop state. | `blocked` | priority |
 | `loop.stalled` | Expected progress did not happen before a bounded deadline or repeated blocker threshold. | `blocked` | priority |
 | `loop.halted` | A brake fired and the controller stopped. | `cancelled` | priority |
 | `loop.converged` | The controller reached its setpoint and is done. | `released` | priority/terminal |
@@ -172,6 +175,7 @@ Use when a risky action requires a fresh, current-state decision.
 - `correlation.correlationKey` must bind run id, step id/action, current external revision/head/state, and approval kind
 - `nextExpectedSignal.signalKey` should name the approval channel/action
 - approval producers must compare current live state before accepting an approval/deny signal
+- include `nextExpectedSignal.approvalId`, action/risk metadata, and an expiry so humans and controllers know exactly what decision is being requested
 
 ```json
 {
@@ -197,9 +201,104 @@ Use when a risky action requires a fresh, current-state decision.
   "evidence": {"kind": "merge_gate", "status": "passed", "url": "https://example.invalid/repo/actions/runs/123"},
   "nextExpectedSignal": {
     "signalKey": "approval.merge.decided:example/repo:86:a1b2c3d4",
-    "deadlineAt": "2026-06-23T18:25:00Z",
+    "approvalId": "approval-merge-run-42-head-a1b2c3d4",
+    "expiresAt": "2026-06-23T18:25:00Z",
     "allowedDecisions": ["approve", "deny"]
   }
+}
+```
+
+### `loop.approval_granted`, `loop.approval_denied`, and `loop.approval_stale`
+
+Use these when an approval producer reports a human decision. ATH records, renders, de-dupes, and wakes; Dynamic Workflows decides whether the decision still matches live state and whether to act.
+
+- `payload.approvalId` must match the request's approval id.
+- `correlation.correlationKey` must match the request and bind run id, step/action, current head/artifact revision, and approval kind.
+- `payload.decision` should be `approve`, `deny`, or `stale`.
+- `payload.trustedAction` must be false unless trusted actor/acted-by checks passed and live state still matches.
+- stale decisions should use `loop.approval_stale` and `evidence.status: stale`, not `loop.approval_granted`.
+- approval and denial decisions are idempotent: retry the same real-world decision with the same `eventId` and `correlation.idempotencyKey`.
+- public comments cannot approve by text alone; a bridge must prove trusted actor/acted-by provenance and re-check the current head/state.
+- ATH must not merge, deploy, delete, or execute destructive operations from these events.
+
+```json
+{
+  "version": "async-thread-event/v1",
+  "eventId": "approval-merge-run-42-head-a1b2c3d4-approved",
+  "eventType": "loop.approval_granted",
+  "producer": {"id": "approval-bridge"},
+  "occurredAt": "2026-06-23T17:30:00Z",
+  "asyncThread": {"threadKey": "ath_..."},
+  "summary": "trusted maintainer approved merge for PR 86 at head a1b2c3d4",
+  "tailMode": "none",
+  "workflowId": "loop:release-readiness:run-42",
+  "stage": "needs_attention",
+  "seriesKey": "loop:release-readiness:run-42:approval:merge",
+  "supersedesEventId": "loop-run-42-approval-merge-head-a1b2c3d4",
+  "loop": {"runId": "run-42", "specId": "release-readiness", "specName": "Release readiness loop", "state": "approval_granted"},
+  "step": {"stepId": "merge", "attempt": 1, "backend": "github"},
+  "correlation": {
+    "correlationKey": "approval:merge:example/repo:86:a1b2c3d4:run-42",
+    "idempotencyKey": "approval-merge-run-42-head-a1b2c3d4-approved",
+    "signalKey": "approval.merge.decided:example/repo:86:a1b2c3d4"
+  },
+  "refs": {"repo": "example/repo", "pullRequest": 86, "headSha": "a1b2c3d4", "approvalId": "approval-merge-run-42-head-a1b2c3d4"},
+  "evidence": {"kind": "approval", "status": "passed", "url": "https://example.invalid/repo/pull/86#issuecomment-1"},
+  "payload": {"approvalId": "approval-merge-run-42-head-a1b2c3d4", "decision": "approve", "trustedAction": true, "trustedActor": "maintainer-a", "trustReason": "trusted maintainer command and current PR head matched a1b2c3d4 at decision time"}
+}
+```
+
+```json
+{
+  "version": "async-thread-event/v1",
+  "eventId": "approval-merge-run-42-head-a1b2c3d4-denied",
+  "eventType": "loop.approval_denied",
+  "producer": {"id": "approval-bridge"},
+  "occurredAt": "2026-06-23T17:31:00Z",
+  "asyncThread": {"threadKey": "ath_..."},
+  "summary": "trusted maintainer denied merge for PR 86 at head a1b2c3d4",
+  "tailMode": "none",
+  "workflowId": "loop:release-readiness:run-42",
+  "stage": "cancelled",
+  "seriesKey": "loop:release-readiness:run-42:approval:merge",
+  "supersedesEventId": "loop-run-42-approval-merge-head-a1b2c3d4",
+  "loop": {"runId": "run-42", "specId": "release-readiness", "specName": "Release readiness loop", "state": "approval_denied"},
+  "step": {"stepId": "merge", "attempt": 1, "backend": "github"},
+  "correlation": {
+    "correlationKey": "approval:merge:example/repo:86:a1b2c3d4:run-42",
+    "idempotencyKey": "approval-merge-run-42-head-a1b2c3d4-denied",
+    "signalKey": "approval.merge.decided:example/repo:86:a1b2c3d4"
+  },
+  "refs": {"repo": "example/repo", "pullRequest": 86, "headSha": "a1b2c3d4", "approvalId": "approval-merge-run-42-head-a1b2c3d4"},
+  "evidence": {"kind": "approval", "status": "failed", "url": "https://example.invalid/repo/pull/86#issuecomment-2"},
+  "payload": {"approvalId": "approval-merge-run-42-head-a1b2c3d4", "decision": "deny", "trustedAction": true, "trustedActor": "maintainer-a", "trustReason": "trusted maintainer command and current PR head matched a1b2c3d4 at decision time"}
+}
+```
+
+```json
+{
+  "version": "async-thread-event/v1",
+  "eventId": "approval-merge-run-42-head-a1b2c3d4-stale-after-head-bbbb2222",
+  "eventType": "loop.approval_stale",
+  "producer": {"id": "approval-bridge"},
+  "occurredAt": "2026-06-23T17:32:00Z",
+  "asyncThread": {"threadKey": "ath_..."},
+  "summary": "approval ignored because PR #86 moved from a1b2c3d4 to bbbb2222",
+  "tailMode": "none",
+  "workflowId": "loop:release-readiness:run-42",
+  "stage": "blocked",
+  "seriesKey": "loop:release-readiness:run-42:approval:merge",
+  "supersedesEventId": "loop-run-42-approval-merge-head-a1b2c3d4",
+  "loop": {"runId": "run-42", "specId": "release-readiness", "specName": "Release readiness loop", "state": "approval_stale"},
+  "step": {"stepId": "merge", "attempt": 1, "backend": "github"},
+  "correlation": {
+    "correlationKey": "approval:merge:example/repo:86:a1b2c3d4:run-42",
+    "idempotencyKey": "approval-merge-run-42-head-a1b2c3d4-stale-after-head-bbbb2222",
+    "signalKey": "approval.merge.decided:example/repo:86:a1b2c3d4"
+  },
+  "refs": {"repo": "example/repo", "pullRequest": 86, "headSha": "bbbb2222", "expectedHeadSha": "a1b2c3d4", "approvalId": "approval-merge-run-42-head-a1b2c3d4"},
+  "evidence": {"kind": "approval", "status": "stale", "url": "https://example.invalid/repo/pull/86#issuecomment-3"},
+  "payload": {"approvalId": "approval-merge-run-42-head-a1b2c3d4", "decision": "stale", "trustedAction": false, "staleReason": "head_changed", "trustReason": "current head bbbb2222 did not match approval correlation head a1b2c3d4"}
 }
 ```
 
