@@ -40,6 +40,11 @@ def _enabled(registry, thread_key):
     return handle.enabled
 
 
+def _delete_handle_row(registry, thread_key):
+    with registry._connect() as conn:
+        conn.execute("delete from async_thread_handles where thread_key = ?", (thread_key,))
+
+
 def test_ath_finalizer_retires_enabled_listener_and_removes_secret(tmp_path):
     registry = _registry(tmp_path)
     handle = _handle(registry)
@@ -83,6 +88,40 @@ def test_ath_finalizer_is_idempotent_for_already_disabled_or_absent_listener(tmp
     assert absent["ok"] is True
     assert absent["summary"] == "ATH listener already absent"
     assert absent["evidence"][0]["found"] is False
+
+
+def test_unscoped_absent_listener_cleanup_removes_orphan_secret_artifacts(tmp_path):
+    registry = _registry(tmp_path)
+    handle = _handle(registry)
+    artifact = write_secret_artifact(handle, root=tmp_path / "secrets")
+    _delete_handle_row(registry, handle.thread_key)
+    adapter = AthFinalizerAdapter(registry=registry, secret_root=tmp_path / "secrets")
+
+    absent = adapter(_context(handle.thread_key))
+
+    assert absent["ok"] is True
+    assert absent["summary"] == "ATH listener already absent"
+    assert absent["evidence"][0]["found"] is False
+    assert absent["evidence"][0]["secretMaterialRemoved"] is True
+    assert not artifact.secret_file.exists()
+    assert not artifact.contract_file.exists()
+
+
+def test_owner_scoped_absent_listener_cleanup_preserves_unowned_secret_artifacts(tmp_path):
+    registry = _registry(tmp_path)
+    handle = _handle(registry, owner_user_id="owner-1")
+    artifact = write_secret_artifact(handle, root=tmp_path / "secrets")
+    _delete_handle_row(registry, handle.thread_key)
+    adapter = AthFinalizerAdapter(registry=registry, secret_root=tmp_path / "secrets", owner_user_id="owner-1")
+
+    absent = adapter(_context(handle.thread_key))
+
+    assert absent["ok"] is True
+    assert absent["summary"] == "ATH listener already absent"
+    assert absent["evidence"][0]["found"] is False
+    assert absent["evidence"][0]["secretMaterialRemoved"] is False
+    assert artifact.secret_file.exists()
+    assert artifact.contract_file.exists()
 
 
 def test_ath_finalizer_fails_closed_without_thread_key_or_on_owner_mismatch(tmp_path):
