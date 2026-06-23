@@ -8,10 +8,12 @@ import hashlib
 from pathlib import Path
 from typing import Any, Mapping
 
+from .lifecycle import is_terminal_event, terminal_action
 from .privacy import redact_metadata_text, safe_event_id
 from .registry import AsyncThreadHandle, AsyncThreadRegistry, safe_session_key_hash
 from .rendering import render_event_message, tail_mode_from_event
 from .routing import send_metadata_for_source
+from .secrets import remove_secret_artifact, secret_root_from_config
 from .security import (
     DEFAULT_REPLAY_WINDOW_SECONDS,
     EventValidationError,
@@ -222,6 +224,17 @@ def _build_adapter_base():
                 if not verify_hmac_signature(raw, handle.secret, signature_header(request.headers)):
                     return web.json_response({"error": "invalid signature"}, status=401)
                 if not handle.enabled:
+                    if self._registry.has_seen(producer_id=fields["producer_id"], event_id=fields["event_id"]):
+                        self._registry.log_event(
+                            producer_id=fields["producer_id"],
+                            event_id=fields["event_id"],
+                            thread_key=fields["thread_key"],
+                            event_type=fields["event_type"],
+                            outcome="duplicate",
+                            summary=fields["summary"],
+                            detail={"handle_enabled": False, "policy": handle.policy, "target_platform": handle.platform},
+                        )
+                        return web.json_response({"status": "duplicate", "threadKey": handle.thread_key})
                     self._registry.log_event(
                         producer_id=fields["producer_id"],
                         event_id=fields["event_id"],
@@ -318,6 +331,7 @@ def _build_adapter_base():
                     )
                     raise
                 self._record_workflow_state(handle, data, fields, detail)
+                self._apply_lifecycle_after_dispatch(handle, data, fields, detail)
                 self._registry.log_event(
                     producer_id=fields["producer_id"],
                     event_id=fields["event_id"],
@@ -459,6 +473,27 @@ def _build_adapter_base():
                 return
             detail["workflow_id"] = state.workflow_id
             detail["workflow_stage"] = state.stage
+
+        def _apply_lifecycle_after_dispatch(
+            self,
+            handle: AsyncThreadHandle,
+            data: Mapping[str, Any],
+            fields: Mapping[str, str],
+            detail: dict[str, Any],
+        ) -> None:
+            policy = handle.lifecycle_policy
+            if not is_terminal_event(data, fields, policy):
+                return
+            action = terminal_action(policy)
+            detail["terminal_event"] = True
+            detail["terminal_action"] = action
+            detail["lifecycle_policy"] = policy.public_summary()
+            if action != "auto_retired":
+                detail["terminal_retired"] = False
+                return
+            retired = self._registry.set_enabled(handle.thread_key, False)
+            remove_secret_artifact(handle.thread_key, root=secret_root_from_config(self.config))
+            detail["terminal_retired"] = bool(retired)
 
         def _should_coalesce(
             self,

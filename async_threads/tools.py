@@ -39,6 +39,9 @@ _CREATE_SCHEMA = {
             "timeout_seconds": {"type": "integer", "description": "Agent-queue timeout intent. Default 120 seconds."},
             "continuation_toolsets": {"type": "array", "items": {"type": "string"}, "description": "Optional toolsets intended for continuation policy metadata."},
             "fail_closed_without_core_bounds": {"type": "boolean", "description": "If true, reject agent_queue dispatch while Hermes core lacks hard per-event bounds."},
+            "terminal_event_types": {"type": "array", "items": {"type": "string"}, "description": "Event type patterns that mean this listener's workflow is terminal, e.g. *.goal.finished."},
+            "auto_retire_on_terminal": {"type": "boolean", "description": "If true, retire this listener after a configured terminal event. Use only for single-goal listeners."},
+            "shared_listener": {"type": "boolean", "description": "If true, never auto-retire on terminal events because multiple workflows may share the listener."},
         },
         "required": ["purpose"],
     },
@@ -207,6 +210,7 @@ def ath_create_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
             policy=spec["policy"],
             ack_mode=spec["ack_mode"],
             continuation_policy=spec["continuation_policy"],
+            lifecycle_policy=spec["lifecycle_policy"],
         )
         if existing is not None:
             return _json(
@@ -232,6 +236,7 @@ def ath_create_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
             owner_user_id=origin.owner_user_id,
             event_url=_event_url(config),
             continuation_policy=spec["continuation_policy"],
+            lifecycle_policy=spec["lifecycle_policy"],
         )
     except ListenValidationError as exc:
         return _json(_error("invalid_request", str(exc)))
@@ -261,7 +266,7 @@ def ath_list_listeners_tool(args: dict[str, Any], **kwargs: Any) -> str:
     return _json(
         {
             "ok": True,
-            "listeners": [_handle_summary(handle, event_url=_event_url(config), secret_root=secret_root_from_config(config), ensure_secret_ref=False) for handle in listeners],
+            "listeners": [_handle_summary_with_terminal(registry, handle, event_url=_event_url(config), secret_root=secret_root_from_config(config), ensure_secret_ref=False) for handle in listeners],
             "count": len(listeners),
         }
     )
@@ -276,7 +281,7 @@ def ath_get_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
     if handle is None:
         return _json(_error("not_found", "async-thread listener not found"))
     ensure_secret_ref = bool(handle.enabled)
-    return _json({"ok": True, "listener": _handle_summary(handle, event_url=_event_url(config), secret_root=secret_root_from_config(config), ensure_secret_ref=ensure_secret_ref)})
+    return _json({"ok": True, "listener": _handle_summary_with_terminal(registry, handle, event_url=_event_url(config), secret_root=secret_root_from_config(config), ensure_secret_ref=ensure_secret_ref)})
 
 
 def ath_retire_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
@@ -454,6 +459,11 @@ def _listener_spec(args: Mapping[str, Any]) -> dict[str, Any]:
         "toolsets": [str(item) for item in _as_list(args.get("continuation_toolsets")) if str(item).strip()],
         "fail_closed_without_core_bounds": bool(args.get("fail_closed_without_core_bounds", False)),
     }
+    lifecycle_policy = {
+        "terminal_event_types": [str(item) for item in _as_list(args.get("terminal_event_types")) if str(item).strip()],
+        "auto_retire_on_terminal": bool(args.get("auto_retire_on_terminal", False)),
+        "shared_listener": bool(args.get("shared_listener", False)),
+    }
     return {
         "producer_id": producer_id,
         "event_types": tuple(event_types),
@@ -461,6 +471,7 @@ def _listener_spec(args: Mapping[str, Any]) -> dict[str, Any]:
         "policy": policy,
         "ack_mode": ack_mode,
         "continuation_policy": continuation_policy,
+        "lifecycle_policy": lifecycle_policy,
     }
 
 
@@ -474,8 +485,12 @@ def _find_equivalent_listener(
     policy: str,
     ack_mode: str,
     continuation_policy: Mapping[str, Any],
+    lifecycle_policy: Mapping[str, Any],
 ) -> AsyncThreadHandle | None:
     expected_continuation = ContinuationPolicy.from_mapping(continuation_policy).to_mapping()
+    from .lifecycle import LifecyclePolicy
+
+    expected_lifecycle = LifecyclePolicy.from_mapping(lifecycle_policy).to_mapping()
     for handle in registry.list_handles(owner_user_id=owner_user_id, include_disabled=False):
         if handle.producer_id != producer_id:
             continue
@@ -486,6 +501,8 @@ def _find_equivalent_listener(
         if handle.ack_mode != ack_mode:
             continue
         if handle.continuation_policy.to_mapping() != expected_continuation:
+            continue
+        if handle.lifecycle_policy.to_mapping() != expected_lifecycle:
             continue
         if _same_origin(handle, origin):
             return handle
@@ -510,6 +527,27 @@ def _same_origin(handle: AsyncThreadHandle, origin: OriginResolution) -> bool:
         str(source.get(key) or "") == str(current.get(key) or "")
         for key in ("platform", "chat_id", "thread_id", "parent_chat_id")
     )
+
+
+def _handle_summary_with_terminal(
+    registry: AsyncThreadRegistry,
+    handle: AsyncThreadHandle,
+    *,
+    event_url: str = "",
+    secret_root: Any | None = None,
+    ensure_secret_ref: bool = False,
+) -> dict[str, Any]:
+    summary = _handle_summary(handle, event_url=event_url, secret_root=secret_root, ensure_secret_ref=ensure_secret_ref)
+    terminal = registry.latest_terminal_event(thread_key=handle.thread_key)
+    if terminal is not None:
+        summary["terminalState"] = {
+            "eventId": terminal.event_id,
+            "eventType": terminal.event_type,
+            "action": terminal.detail.get("terminal_action", ""),
+            "createdAt": terminal.created_at,
+            "staleEnabled": bool(handle.enabled and terminal.detail.get("terminal_action") in {"warn_only", "shared_listener_kept_enabled"}),
+        }
+    return summary
 
 
 def _handle_summary(
@@ -539,6 +577,7 @@ def _handle_summary(
         "sessionId": handle.session_id,
         "secretAvailable": bool(handle.secret),
         "continuationPolicy": handle.continuation_policy.public_summary(core_enforced=False),
+        "lifecyclePolicy": handle.lifecycle_policy.public_summary(),
     }
     summary["secretRef"] = describe_secret_artifact(
         handle,

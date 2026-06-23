@@ -49,7 +49,7 @@ def build_producer_handoff(
         "exampleEvent": minimal_event,
         "contract": _contract_summary(handle, event_url=event_url, event_type=default_event_type, secret_ref=secret_ref),
         "retryDeduping": _retry_guidance(),
-        "lifecycle": _lifecycle_guidance(),
+        "lifecycle": _lifecycle_guidance(handle),
         "safety": {
             "rawSecretReturned": False,
             "eventPayloadsAreUntrustedData": True,
@@ -118,6 +118,7 @@ def write_handoff_files(
         "secretFile": secret_ref.get("secretFile", ""),
         "contractFile": secret_ref.get("contractFile", ""),
         "retryDeduping": _retry_guidance(),
+        "lifecycle": _lifecycle_guidance(handle),
     }
     _write_private_text(config_file, json.dumps(config, indent=2, sort_keys=True) + "\n")
     _write_private_text(script_file, _emitter_script())
@@ -221,10 +222,17 @@ def _retry_guidance() -> dict[str, Any]:
     }
 
 
-def _lifecycle_guidance() -> dict[str, Any]:
+def _lifecycle_guidance(handle: AsyncThreadHandle) -> dict[str, Any]:
+    policy = handle.lifecycle_policy
+    terminal_events = list(policy.terminal_event_types)
     return {
+        "terminalEventTypes": terminal_events,
+        "terminalStages": list(policy.terminal_stages),
+        "autoRetireOnTerminal": policy.auto_retire_on_terminal,
+        "sharedListener": policy.shared_listener,
+        "producerSelfExit": "after emitting a terminal event, stop the producer/supervisor loop instead of polling forever",
         "rotateSecret": "refresh producer config from the listener's secretFile after rotation",
-        "retire": "retire or revoke temporary listeners when the workflow is merged, abandoned, or no longer needs wakeups",
+        "retire": "retire or revoke temporary listeners when the workflow is merged, abandoned, or no longer needs wakeups; single-goal listeners can opt into auto-retire on terminal events",
         "trace": "use ath_trace_event or /ath trace <eventId> for delivery/de-dupe diagnostics",
     }
 

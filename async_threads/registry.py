@@ -15,11 +15,12 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .continuation import ContinuationPolicy
+from .lifecycle import LifecyclePolicy
 from .privacy import redact_metadata_text, redact_secret_text, safe_event_id
 from .workflows import WorkflowPolicy, apply_workflow_transition, normalize_workflow_event
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SAFE_DETAIL_KEYS = {
     "ack_mode",
@@ -42,10 +43,14 @@ SAFE_DETAIL_KEYS = {
     "handle_enabled",
     "handle_message_called",
     "handle_message_returned",
+    "lifecycle_policy",
     "policy",
     "queued",
     "session_key_hash",
     "session_key_present",
+    "terminal_action",
+    "terminal_event",
+    "terminal_retired",
     "workflow_id",
     "workflow_stage",
     "target_adapter_exists",
@@ -78,6 +83,7 @@ class AsyncThreadHandle:
     debounce_seconds: int = 0
     workflow_policy: WorkflowPolicy = field(default_factory=WorkflowPolicy)
     continuation_policy: ContinuationPolicy = field(default_factory=ContinuationPolicy)
+    lifecycle_policy: LifecyclePolicy = field(default_factory=LifecyclePolicy)
     created_at: str = ""
     updated_at: str = ""
 
@@ -175,7 +181,8 @@ class AsyncThreadRegistry:
                     ack_mode text not null default 'none',
                     debounce_seconds integer not null default 0,
                     workflow_policy_json text not null default '{}',
-                    continuation_policy_json text not null default '{}'
+                    continuation_policy_json text not null default '{}',
+                    lifecycle_policy_json text not null default '{}'
                 );
 
                 create index if not exists idx_async_thread_handles_owner
@@ -260,6 +267,8 @@ class AsyncThreadRegistry:
             conn.execute("alter table async_thread_handles add column workflow_policy_json text not null default '{}'")
         if "continuation_policy_json" not in handle_columns:
             conn.execute("alter table async_thread_handles add column continuation_policy_json text not null default '{}'")
+        if "lifecycle_policy_json" not in handle_columns:
+            conn.execute("alter table async_thread_handles add column lifecycle_policy_json text not null default '{}'")
 
     def create_handle(
         self,
@@ -276,6 +285,7 @@ class AsyncThreadRegistry:
         debounce_seconds: int = 0,
         workflow_policy: WorkflowPolicy | dict[str, Any] | None = None,
         continuation_policy: ContinuationPolicy | dict[str, Any] | None = None,
+        lifecycle_policy: LifecyclePolicy | dict[str, Any] | None = None,
     ) -> AsyncThreadHandle:
         producer_id = _clean_token(producer_id, default="default")
         policy = policy if policy in {"agent_queue", "direct"} else "agent_queue"
@@ -285,6 +295,7 @@ class AsyncThreadRegistry:
         continuation_policy_obj = (
             continuation_policy if isinstance(continuation_policy, ContinuationPolicy) else ContinuationPolicy.from_mapping(continuation_policy)
         )
+        lifecycle_policy_obj = lifecycle_policy if isinstance(lifecycle_policy, LifecyclePolicy) else LifecyclePolicy.from_mapping(lifecycle_policy)
         thread_key = f"ath_{secrets.token_urlsafe(12).replace('-', '').replace('_', '')[:16]}"
         secret = secrets.token_urlsafe(32)
         now = utc_now()
@@ -296,8 +307,8 @@ class AsyncThreadRegistry:
                     thread_key, created_at, updated_at, enabled, label, source_json,
                     session_key, session_id, owner_user_id, producer_id, secret,
                     allowed_event_types_json, policy, ack_mode, debounce_seconds, workflow_policy_json,
-                    continuation_policy_json
-                ) values (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    continuation_policy_json, lifecycle_policy_json
+                ) values (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     thread_key,
@@ -316,6 +327,7 @@ class AsyncThreadRegistry:
                     debounce_seconds,
                     workflow_policy_obj.to_json(),
                     continuation_policy_obj.to_json(),
+                    lifecycle_policy_obj.to_json(),
                 ),
             )
         return self.get_handle(thread_key)  # type: ignore[return-value]
@@ -525,6 +537,14 @@ class AsyncThreadRegistry:
         except sqlite3.IntegrityError:
             return False
 
+    def has_seen(self, *, producer_id: str, event_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "select 1 from seen_events where producer_id = ? and event_id = ? limit 1",
+                (producer_id, event_id),
+            ).fetchone()
+        return row is not None
+
     def forget_seen(self, *, producer_id: str, event_id: str) -> None:
         """Remove a seen marker after dispatch failure so producers can retry."""
         with self._connect() as conn:
@@ -672,6 +692,22 @@ class AsyncThreadRegistry:
         with self._connect() as conn:
             return int(conn.execute(sql, params).fetchone()[0])
 
+    def latest_terminal_event(self, *, thread_key: str) -> AsyncThreadEventLog | None:
+        for event in self.list_recent_events(thread_key=thread_key, limit=50):
+            if event.detail.get("terminal_event") is True:
+                return event
+        return None
+
+    def list_stale_terminal_handles(self, *, owner_user_id: str | None = None) -> list[tuple[AsyncThreadHandle, AsyncThreadEventLog]]:
+        stale: list[tuple[AsyncThreadHandle, AsyncThreadEventLog]] = []
+        for handle in self.list_handles(owner_user_id=owner_user_id, include_disabled=False):
+            event = self.latest_terminal_event(thread_key=handle.thread_key)
+            if event is None:
+                continue
+            if event.detail.get("terminal_action") in {"warn_only", "shared_listener_kept_enabled"}:
+                stale.append((handle, event))
+        return stale
+
 
 def _row_to_handle(row: sqlite3.Row) -> AsyncThreadHandle:
     return AsyncThreadHandle(
@@ -690,6 +726,7 @@ def _row_to_handle(row: sqlite3.Row) -> AsyncThreadHandle:
         debounce_seconds=int(row["debounce_seconds"] or 0),
         workflow_policy=WorkflowPolicy.from_json(row["workflow_policy_json"] if "workflow_policy_json" in row.keys() else "{}"),
         continuation_policy=ContinuationPolicy.from_json(row["continuation_policy_json"] if "continuation_policy_json" in row.keys() else "{}"),
+        lifecycle_policy=LifecyclePolicy.from_json(row["lifecycle_policy_json"] if "lifecycle_policy_json" in row.keys() else "{}"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -791,6 +828,9 @@ def sanitize_event_detail(detail: dict[str, Any] | None) -> dict[str, Any]:
         if key_text == "continuation_policy" and isinstance(value, dict):
             sanitized[key_text] = _sanitize_continuation_policy(value)
             continue
+        if key_text == "lifecycle_policy" and isinstance(value, dict):
+            sanitized[key_text] = _sanitize_lifecycle_policy(value)
+            continue
         cleaned = _sanitize_detail_value(value)
         if cleaned is not None:
             sanitized[key_text] = cleaned
@@ -812,6 +852,21 @@ def _sanitize_continuation_policy(value: dict[str, Any]) -> dict[str, Any]:
     safe["failClosedWithoutCoreBounds"] = bool(value.get("failClosedWithoutCoreBounds", False))
     safe["coreEnforced"] = bool(value.get("coreEnforced", False))
     return safe
+
+
+def _sanitize_lifecycle_policy(value: dict[str, Any]) -> dict[str, Any]:
+    def _safe_list(key: str) -> list[str]:
+        items = value.get(key, [])
+        if not isinstance(items, list):
+            return []
+        return [redact_metadata_text(str(item))[:80] for item in items[:16] if str(item).strip()]
+
+    return {
+        "terminalEventTypes": _safe_list("terminalEventTypes"),
+        "terminalStages": _safe_list("terminalStages"),
+        "autoRetireOnTerminal": bool(value.get("autoRetireOnTerminal", False)),
+        "sharedListener": bool(value.get("sharedListener", False)),
+    }
 
 
 def safe_session_key_hash(session_key: str | None) -> str:

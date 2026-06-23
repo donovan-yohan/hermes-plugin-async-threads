@@ -777,3 +777,102 @@ async def test_tool_created_direct_listener_accepts_signed_event_and_dedupes(tmp
     assert "ignore previous instructions" in content
     events = registry.list_recent_events(thread_key=handle.thread_key, owner_user_id="user-1", limit=5)
     assert [event.outcome for event in events] == ["duplicate", "direct_delivered"]
+
+@pytest.mark.asyncio
+async def test_terminal_event_auto_retires_single_goal_listener_idempotently(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    created = _loads(
+        ath_create_listener_tool(
+            {
+                "purpose": "watch release goal",
+                "producer_hint": "release",
+                "event_types": ["release.goal.finished"],
+                "terminal_event_types": ["release.goal.finished"],
+                "auto_retire_on_terminal": True,
+                "delivery": "direct",
+            },
+            **_tool_kwargs(registry, tmp_path),
+        )
+    )
+    handle = registry.get_handle(created["listener"]["threadKey"])
+    assert handle is not None
+    assert handle.lifecycle_policy.auto_retire_on_terminal is True
+
+    target = FakeSendAdapter()
+    adapter = AsyncThreadsAdapter(_tool_kwargs(registry, tmp_path)["config"])
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+    body = _event_body(handle, event_id="goal-terminal-1", event_type="release.goal.finished")
+
+    first = await adapter._handle_event(FakeRequest(body, handle.secret))
+    duplicate = await adapter._handle_event(FakeRequest(body, handle.secret))
+    new_after_terminal = await adapter._handle_event(FakeRequest(_event_body(handle, event_id="goal-terminal-2", event_type="release.goal.finished"), handle.secret))
+
+    assert first.status == 200
+    assert json.loads(first.text)["status"] == "delivered"
+    assert duplicate.status == 200
+    assert json.loads(duplicate.text)["status"] == "duplicate"
+    assert new_after_terminal.status == 401
+    assert len(target.sent) == 1
+    retired = registry.get_handle(handle.thread_key)
+    assert retired is not None
+    assert retired.enabled is False
+    terminal = registry.latest_terminal_event(thread_key=handle.thread_key)
+    assert terminal is not None
+    assert terminal.detail["terminal_event"] is True
+    assert terminal.detail["terminal_action"] == "auto_retired"
+    assert terminal.detail["terminal_retired"] is True
+
+
+@pytest.mark.asyncio
+async def test_terminal_event_without_auto_retire_reports_stale_enabled_listener(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    handle = registry.create_handle(
+        source=_source().to_dict(),
+        producer_id="release",
+        allowed_event_types=["release.goal.finished"],
+        owner_user_id="user-1",
+        policy="direct",
+    )
+    target = FakeSendAdapter()
+    adapter = AsyncThreadsAdapter(PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")}))
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+
+    response = await adapter._handle_event(FakeRequest(_event_body(handle, event_id="goal-terminal-warn", event_type="release.goal.finished"), handle.secret))
+
+    assert response.status == 200
+    assert registry.get_handle(handle.thread_key).enabled is True
+    stale = registry.list_stale_terminal_handles(owner_user_id="user-1")
+    assert [(item.thread_key, event.detail["terminal_action"]) for item, event in stale] == [(handle.thread_key, "warn_only")]
+    listed = _loads(ath_list_listeners_tool({}, **_tool_kwargs(registry, tmp_path)))
+    assert listed["listeners"][0]["terminalState"]["staleEnabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_shared_listener_ignores_auto_retire_on_terminal(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    handle = registry.create_handle(
+        source=_source().to_dict(),
+        producer_id="release",
+        allowed_event_types=["release.goal.finished"],
+        owner_user_id="user-1",
+        policy="direct",
+        lifecycle_policy={
+            "terminal_event_types": ["release.goal.finished"],
+            "auto_retire_on_terminal": True,
+            "shared_listener": True,
+        },
+    )
+    target = FakeSendAdapter()
+    adapter = AsyncThreadsAdapter(PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")}))
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+
+    response = await adapter._handle_event(FakeRequest(_event_body(handle, event_id="goal-terminal-shared", event_type="release.goal.finished"), handle.secret))
+
+    assert response.status == 200
+    still_enabled = registry.get_handle(handle.thread_key)
+    assert still_enabled is not None
+    assert still_enabled.enabled is True
+    terminal = registry.latest_terminal_event(thread_key=handle.thread_key)
+    assert terminal is not None
+    assert terminal.detail["terminal_action"] == "shared_listener_kept_enabled"
+    assert terminal.detail["terminal_retired"] is False

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
 from .continuation import ContinuationPolicy
+from .lifecycle import LifecyclePolicy
 from .registry import AsyncThreadHandle, AsyncThreadRegistry
 from .workflows import WorkflowPolicy
 
@@ -40,6 +41,7 @@ class ListenRequest:
     candidate_required: tuple[str, ...] = ()
     workflow_policy: WorkflowPolicy = field(default_factory=WorkflowPolicy)
     continuation_policy: ContinuationPolicy = field(default_factory=ContinuationPolicy)
+    lifecycle_policy: LifecyclePolicy = field(default_factory=LifecyclePolicy)
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,7 @@ class ListenResult:
                 "candidate_required": list(self.handle.workflow_policy.candidate_required),
             },
             "continuationPolicy": self.handle.continuation_policy.public_summary(core_enforced=False),
+            "lifecyclePolicy": self.handle.lifecycle_policy.public_summary(),
             "eventUrl": self.event_url,
             "source": self.source,
             "sessionKeyPresent": bool(self.session_key),
@@ -118,6 +121,7 @@ def create_listener(
     debounce_seconds: Any = 0,
     workflow_policy: WorkflowPolicy | Mapping[str, Any] | None = None,
     continuation_policy: ContinuationPolicy | Mapping[str, Any] | None = None,
+    lifecycle_policy: LifecyclePolicy | Mapping[str, Any] | None = None,
     gate_order: Iterable[str] = (),
     gate_mode: str = "serial",
     stale_on_artifact_change: Iterable[str] = (),
@@ -143,6 +147,7 @@ def create_listener(
         debounce_seconds=debounce_seconds,
         workflow_policy=workflow_policy,
         continuation_policy=continuation_policy,
+        lifecycle_policy=lifecycle_policy,
         gate_order=gate_order,
         gate_mode=gate_mode,
         stale_on_artifact_change=stale_on_artifact_change,
@@ -166,6 +171,7 @@ def create_listener(
         debounce_seconds=request.debounce_seconds,
         workflow_policy=request.workflow_policy,
         continuation_policy=request.continuation_policy,
+        lifecycle_policy=request.lifecycle_policy,
     )
     return ListenResult(
         handle=handle,
@@ -186,6 +192,7 @@ def normalize_listen_request(
     debounce_seconds: Any = 0,
     workflow_policy: WorkflowPolicy | Mapping[str, Any] | None = None,
     continuation_policy: ContinuationPolicy | Mapping[str, Any] | None = None,
+    lifecycle_policy: LifecyclePolicy | Mapping[str, Any] | None = None,
     gate_order: Iterable[str] = (),
     gate_mode: str = "serial",
     stale_on_artifact_change: Iterable[str] = (),
@@ -225,6 +232,7 @@ def normalize_listen_request(
     continuation_policy_obj = (
         continuation_policy if isinstance(continuation_policy, ContinuationPolicy) else ContinuationPolicy.from_mapping(continuation_policy)
     )
+    lifecycle_policy_obj = lifecycle_policy if isinstance(lifecycle_policy, LifecyclePolicy) else LifecyclePolicy.from_mapping(lifecycle_policy)
     return ListenRequest(
         producer_id=str(producer_id or ""),
         allowed_event_types=tuple(str(event_type) for event_type in allowed_event_types),
@@ -239,6 +247,7 @@ def normalize_listen_request(
         candidate_required=tuple(str(item) for item in candidate_required),
         workflow_policy=workflow_policy_obj,
         continuation_policy=continuation_policy_obj,
+        lifecycle_policy=lifecycle_policy_obj,
     )
 
 
