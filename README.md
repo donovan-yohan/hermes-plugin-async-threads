@@ -122,6 +122,7 @@ See [`docs/SECURITY.md`](docs/SECURITY.md) for more detail.
 - optional debounce/coalescing for routine same-thread updates;
 - generic workflow-stage/candidate/evidence tracking with serial/parallel gate policy;
 - terminal-event lifecycle policy for warning on stale enabled listeners or auto-retiring single-goal listeners after successful terminal delivery;
+- Dynamic Workflows finalizer adapter helpers for registering `ath.listener.retire` cleanup handlers without coupling Dynamic Workflows core to ATH internals;
 - explicit agent-queue continuation policy metadata, with fail-closed mode when hard Hermes core bounds are required;
 - producer helper script for compact background-lane events;
 - model-facing producer handoff generation for generic contracts, local emitter files, GitHub Actions recipes, and explicit debug emitters;
@@ -134,6 +135,26 @@ See [`docs/SECURITY.md`](docs/SECURITY.md) for more detail.
 - Direct delivery, acknowledgement, and command notices share a centralized send-metadata helper, but the helper still wraps a private Hermes gateway function until the [stable continuation API](docs/design/STABLE_CONTINUATION_API.md) lands.
 - Active-session queueing currently relies on Hermes gateway/adapter internals; the continuation API spike names the smallest core seam to remove that coupling.
 - CLI and Hermes Desktop cannot create a listener from “here” yet; listener creation needs a live gateway origin, and no-source contexts fail closed.
+
+## Dynamic Workflows finalizer adapter
+
+Dynamic Workflows owns the backend-neutral resource/finalizer contract. ATH owns
+the concrete listener cleanup action. Use `async_threads.finalizers` to register
+the ATH handler with a Dynamic Workflows `ResourceFinalizerRegistry`:
+
+```python
+from async_threads.finalizers import register_ath_finalizers
+from hermes_workflows import ResourceFinalizerRegistry
+
+finalizers = ResourceFinalizerRegistry()
+register_ath_finalizers(finalizers, registry=async_thread_registry, secret_root=secret_root)
+```
+
+The registered action is `ath.listener.retire`. It expects the workflow resource
+handle to contain `threadKey` or `thread_key`, disables the listener through the
+ATH registry, removes producer-facing secret artifacts, and returns bounded
+evidence without raw HMAC secrets. The adapter is idempotent for already-retired
+or absent listeners and can optionally enforce an `owner_user_id` match.
 
 ## Development
 
