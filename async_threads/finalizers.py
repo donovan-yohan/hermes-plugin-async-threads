@@ -85,12 +85,14 @@ class AthFinalizerAdapter:
                 },
             )
 
-        removed_secret_material = remove_secret_artifact(thread_key, root=self.secret_root)
         was_enabled = bool(handle.enabled)
         retired = self.registry.set_enabled(thread_key, False) if was_enabled else True
         after = self.registry.get_handle(thread_key)
         enabled_after = bool(after.enabled) if after is not None else False
         ok = bool(retired and not enabled_after)
+        removed_secret_material = False
+        if ok:
+            removed_secret_material = remove_secret_artifact(thread_key, root=self.secret_root)
         summary = "ATH listener retired" if was_enabled else "ATH listener already retired"
         evidence = {
             "kind": "ath.listener.retire",
