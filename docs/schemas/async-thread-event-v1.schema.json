@@ -122,6 +122,52 @@
           "description": "Producer evidence status. The receiver normalizes unknown values to unknown."
         }
       }
+    },
+    "loop": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Loop-controller metadata for loop.* events. Treated as untrusted data.",
+      "properties": {
+        "runId": {"type": "string", "minLength": 1, "maxLength": 200},
+        "specId": {"type": "string", "minLength": 1, "maxLength": 200},
+        "specName": {"type": "string", "maxLength": 200},
+        "state": {"type": "string", "maxLength": 80}
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Step metadata for step-scoped loop events.",
+      "properties": {
+        "stepId": {"type": "string", "minLength": 1, "maxLength": 200},
+        "attempt": {"type": "integer", "minimum": 0},
+        "backend": {"type": "string", "maxLength": 200}
+      }
+    },
+    "correlation": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Routing/idempotency/stale-state keys. These do not make payload text trusted.",
+      "properties": {
+        "correlationKey": {"type": "string", "minLength": 1, "maxLength": 500},
+        "idempotencyKey": {"type": "string", "minLength": 1, "maxLength": 500},
+        "signalKey": {"type": "string", "minLength": 1, "maxLength": 500}
+      }
+    },
+    "refs": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "External references such as repo, PR, head SHA, deployment, thread, or Relay session handles."
+    },
+    "nextExpectedSignal": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Next signal/action/deadline the controller is waiting for.",
+      "properties": {
+        "signalKey": {"type": "string", "minLength": 1, "maxLength": 500},
+        "deadlineAt": {"type": "string", "maxLength": 100},
+        "onTimeoutEventType": {"type": "string", "maxLength": 200}
+      }
     }
   }
 }

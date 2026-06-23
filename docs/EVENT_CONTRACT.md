@@ -106,6 +106,12 @@ Use a stable `seriesKey` when multiple event ids describe revisions of the same 
 
 Consumers should still verify the live artifact revision before taking irreversible action. The series fields are a producer/consumer convention for stale-event handling; they do not make stale payload text trustworthy.
 
+## Loop-controller events
+
+Feedback-controller loops use the same envelope plus documented `loop`, `step`, `correlation`, `refs`, and `nextExpectedSignal` objects. The public `loop.*` convention is defined in [`LOOP_EVENTS.md`](LOOP_EVENTS.md), including shapes for `loop.started`, `loop.sensor_failed`, `loop.step_started`, `loop.step_completed`, `loop.waiting_for_event`, `loop.waiting_for_approval`, `loop.stalled`, `loop.halted`, and `loop.converged`.
+
+Correlation keys, idempotency keys, signal keys, run ids, and step ids are routing/debugging facts only. They help controllers reject stale events and find evidence, but payload text remains untrusted data and never becomes instructions.
+
 ## Tail modes and large output fields
 
 The renderer treats these payload keys as output/tail-like fields:
@@ -192,4 +198,5 @@ The schema validates the stable envelope. It intentionally allows additional pro
 ## Related docs
 
 - [`QUICKSTART.md`](QUICKSTART.md): install the plugin, create a listener, and send a signed demo event.
+- [`LOOP_EVENTS.md`](LOOP_EVENTS.md): feedback-controller `loop.*` event shapes, run/step correlation, evidence handles, and trust-boundary rules.
 - [`SECURITY.md`](SECURITY.md): trust boundary, HMAC auth, replay/de-dupe, and payload safety model.
