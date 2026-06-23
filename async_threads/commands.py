@@ -19,7 +19,7 @@ from .workflows import WorkflowPolicy
 
 USAGE = """async threads (/ath)
 commands:
-  /ath listen <producer> [--events a,b] [--label text] [--policy agent_queue|direct] [--ack none|brief|debug] [--debounce seconds] [--gate-order review,qa] [--gate-mode serial|parallel] [--stale-on-artifact-change review,qa|all] [--candidate-required qa]
+  /ath listen <producer> [--events a,b] [--label text] [--policy agent_queue|direct] [--ack none|brief|debug] [--debounce seconds] [--terminal-events a,b] [--auto-retire-terminal] [--shared-listener] [--gate-order review,qa] [--gate-mode serial|parallel] [--stale-on-artifact-change review,qa|all] [--candidate-required qa]
   /ath status
   /ath list
   /ath events [thread_key] [--limit N]
@@ -119,9 +119,12 @@ def _run_command(raw_args: str, *, event: Any, gateway: Any) -> str:
 
 def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> str:
     if not args:
-        return "usage: /ath listen <producer> [--events a,b] [--label text] [--policy agent_queue|direct] [--ack none|brief|debug] [--debounce seconds] [--gate-order review,qa] [--gate-mode serial|parallel] [--stale-on-artifact-change review,qa|all] [--candidate-required qa]"
+        return "usage: /ath listen <producer> [--events a,b] [--label text] [--policy agent_queue|direct] [--ack none|brief|debug] [--debounce seconds] [--terminal-events a,b] [--auto-retire-terminal] [--shared-listener] [--gate-order review,qa] [--gate-mode serial|parallel] [--stale-on-artifact-change review,qa|all] [--candidate-required qa]"
     producer_id = args[0]
     events: list[str] = []
+    terminal_events: list[str] = []
+    auto_retire_terminal = False
+    shared_listener = False
     label = ""
     policy = "agent_queue"
     ack_mode = "none"
@@ -136,6 +139,18 @@ def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> 
         if arg == "--events" and i + 1 < len(args):
             events = [e.strip() for e in args[i + 1].split(",") if e.strip()]
             i += 2
+            continue
+        if arg == "--terminal-events" and i + 1 < len(args):
+            terminal_events = [e.strip() for e in args[i + 1].split(",") if e.strip()]
+            i += 2
+            continue
+        if arg == "--auto-retire-terminal":
+            auto_retire_terminal = True
+            i += 1
+            continue
+        if arg == "--shared-listener":
+            shared_listener = True
+            i += 1
             continue
         if arg == "--label" and i + 1 < len(args):
             label = args[i + 1]
@@ -187,6 +202,11 @@ def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> 
             gate_mode=gate_mode,
             stale_on_artifact_change=stale_on_artifact_change,
             candidate_required=candidate_required,
+            lifecycle_policy={
+                "terminal_event_types": terminal_events,
+                "auto_retire_on_terminal": auto_retire_terminal,
+                "shared_listener": shared_listener,
+            },
             event_url=url,
         )
     except ListenValidationError as exc:
@@ -206,6 +226,7 @@ def _cmd_listen(args: list[str], *, event: Any, gateway: Any, registry: Any) -> 
         f"ack: `{handle.ack_mode}`\n"
         f"debounce: `{handle.debounce_seconds}s`\n"
         f"workflow gates: {_format_workflow_policy(handle.workflow_policy)}\n"
+        f"lifecycle: {_format_lifecycle_policy(handle.lifecycle_policy)}\n"
         f"events: {events_text}\n"
         f"url: `{url}`\n"
         f"secretFile: `{secret_ref['secretFile']}`\n"
@@ -224,6 +245,7 @@ def _cmd_status(registry: Any, *, config: Any, gateway: Any, owner_user_id: str)
     listener_count = registry.count_handles(owner_user_id=owner_user_id or "") if owner_user_id else 0
     event_count = registry.count_recent_events(owner_user_id=owner_user_id or "") if owner_user_id else 0
     workflow_count = registry.count_workflow_states(owner_user_id=owner_user_id or "") if owner_user_id else 0
+    stale_terminal_count = len(registry.list_stale_terminal_handles(owner_user_id=owner_user_id or "")) if owner_user_id else 0
     return (
         "async-thread status\n"
         f"receiver: `{_event_url(gateway)}` ({host}:{port})\n"
@@ -231,7 +253,8 @@ def _cmd_status(registry: Any, *, config: Any, gateway: Any, owner_user_id: str)
         f"registry: `{registry_path_from_config(config)}`\n"
         f"listeners: {listener_count}\n"
         f"recent events: {event_count}\n"
-        f"workflows: {workflow_count}"
+        f"workflows: {workflow_count}\n"
+        f"stale terminal listeners: {stale_terminal_count}"
     )
 
 
@@ -404,12 +427,23 @@ def _cmd_lifecycle(registry: Any, thread_key: str, *, owner_user_id: str) -> str
     if thread_key and (handle is None or not owner_user_id or handle.owner_user_id != owner_user_id):
         return "async-thread listener not found."
     scope = f" for `{_display_metadata(thread_key, 80)}`" if thread_key else ""
+    stale = registry.list_stale_terminal_handles(owner_user_id=owner_user_id) if owner_user_id else []
+    stale_lines = []
+    for stale_handle, terminal_event in stale[:10]:
+        stale_lines.append(
+            f"- `{_display_metadata(stale_handle.thread_key, 80)}` terminal={_display_metadata(terminal_event.event_type, 80)} id={_short_event_id(terminal_event.event_id)} action={_display_text(terminal_event.detail.get('terminal_action', '-'), 40)}"
+        )
+    stale_text = "\nstale terminal listeners:\n" + "\n".join(stale_lines) if stale_lines else "\nstale terminal listeners: none"
     return (
         f"async-thread scoped lifecycle{scope}\n"
         "recommended event stages: `started`, `progress`, `blocked`, `ready_for_review`, `review_passed`, `qa_passed`, `released`, `cancelled`\n"
+        "terminal cleanup convention: use terminal event types like `*.goal.finished`, `*.phase.finished`, `*.session.finished`, `*.run.finished`, or listener-specific `--terminal-events`.\n"
+        "for single-goal listeners, create with `--auto-retire-terminal`; for shared listeners, use `--shared-listener` and retire manually after all consumers are done.\n"
         "recommended producer fields: `workflowId`, `stage`, `artifact`, `candidate`, `evidence`, plus `seriesKey`/`subject.artifact.revision` for repeated artifact events.\n"
-        "retire temporary lanes with `/ath retire <thread_key>` after merge/abandonment; retired listeners reject future events with the generic auth error.\n"
-        "use `/ath workflows <thread_key>` for current state and `/ath trace <event-id>` for per-event delivery diagnostics."
+        "retired listeners reject new events with the generic auth error; duplicate retries of an already-accepted terminal event stay idempotent.\n"
+        "producer handoffs should make terminal producers self-exit after emitting the final event.\n"
+        "use `/ath workflows <thread_key>` for current state, `/ath trace <event-id>` for per-event delivery diagnostics, and `/ath retire <thread_key>` for manual cleanup."
+        f"{stale_text}"
     )
 
 
@@ -491,6 +525,20 @@ def _display_text(value: Any, max_len: int) -> str:
 
 def _display_metadata(value: Any, max_len: int) -> str:
     return _clip(redact_metadata_text(str(value or ""), max_chars=1000), max_len)
+
+
+def _format_lifecycle_policy(policy: Any) -> str:
+    terminal_types = list(getattr(policy, "terminal_event_types", ()) or ())
+    auto_retire = bool(getattr(policy, "auto_retire_on_terminal", False))
+    shared = bool(getattr(policy, "shared_listener", False))
+    parts = ["terminal=" + (",".join(_display_text(item, 40) for item in terminal_types) or "default")]
+    if auto_retire:
+        parts.append("auto_retire=true")
+    if shared:
+        parts.append("shared=true")
+    if not auto_retire and not shared:
+        parts.append("auto_retire=false")
+    return "; ".join(parts)
 
 
 def _format_workflow_policy(policy: WorkflowPolicy) -> str:
@@ -642,17 +690,25 @@ def _cmd_list(registry: Any, *, owner_user_id: str) -> str:
     handles = registry.list_handles(owner_user_id=owner_user_id)
     if not handles:
         return "no async-thread listeners for this user. create one with `/ath listen <producer>`."
+    displayed = handles[:20]
+    terminal_by_thread = registry.latest_terminal_events(thread_keys=[h.thread_key for h in displayed])
     lines = ["async-thread listeners:"]
-    for h in handles[:20]:
+    for h in displayed:
         state = "enabled" if h.enabled else "disabled"
         label = f" — {_display_text(h.label, 80)}" if h.label else ""
         thread = f" thread={_display_metadata(h.thread_id, 80)}" if h.thread_id else ""
         debounce = f" debounce={h.debounce_seconds}s" if h.debounce_seconds else ""
         workflow = f" workflow={_format_workflow_policy(h.workflow_policy)}" if h.workflow_policy.gate_order else ""
+        lifecycle = f" lifecycle={_format_lifecycle_policy(h.lifecycle_policy)}"
+        terminal_event = terminal_by_thread.get(h.thread_key)
+        terminal = ""
+        if terminal_event is not None:
+            stale = h.enabled and terminal_event.detail.get("terminal_action") in {"warn_only", "shared_listener_kept_enabled"}
+            terminal = f" terminal={'stale' if stale else terminal_event.detail.get('terminal_action', 'seen')}"
         lines.append(
             f"- `{_display_metadata(h.thread_key, 80)}` {state} "
             f"producer=`{_display_metadata(h.producer_id, 80)}` policy=`{_display_text(h.policy, 40)}`"
-            f"{debounce}{workflow}{thread}{label}"
+            f"{debounce}{workflow}{lifecycle}{terminal}{thread}{label}"
         )
     return "\n".join(lines)
 
@@ -676,6 +732,7 @@ def _cmd_inspect(registry: Any, thread_key: str, *, owner_user_id: str) -> str:
         f"ack: `{_display_text(h.ack_mode, 40)}`\n"
         f"debounce: `{h.debounce_seconds}s`\n"
         f"workflow gates: {_format_workflow_policy(h.workflow_policy)}\n"
+        f"lifecycle: {_format_lifecycle_policy(h.lifecycle_policy)}\n"
         f"events: {events}\n"
         f"platform/chat/thread: `{_display_text(h.platform, 40)}` / `{_display_metadata(h.chat_id, 80)}` / `{_display_metadata(h.thread_id or '-', 80)}`\n"
         f"sessionKey: {session_key_state} hash=`{session_key_hash}`\n"
