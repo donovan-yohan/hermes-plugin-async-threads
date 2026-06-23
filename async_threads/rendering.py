@@ -34,6 +34,8 @@ _LOOP_HEADINGS = {
     "loop.step_started": "Loop step started",
     "loop.step_completed": "Loop step completed",
     "loop.waiting_for_event": "Loop waiting for event",
+    "loop.wait_timeout": "Loop wait timeout",
+    "loop.watchdog_fired": "Loop watchdog fired",
     "loop.waiting_for_approval": "Loop waiting for approval",
     "loop.approval_granted": "Loop approval granted",
     "loop.approval_denied": "Loop approval denied",
@@ -44,6 +46,8 @@ _LOOP_HEADINGS = {
 }
 _LOOP_PRIORITY_EVENTS = {
     "loop.sensor_failed",
+    "loop.wait_timeout",
+    "loop.watchdog_fired",
     "loop.waiting_for_approval",
     "loop.approval_granted",
     "loop.approval_denied",

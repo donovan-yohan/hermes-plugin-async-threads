@@ -333,6 +333,8 @@ def test_camelcase_tail_keys_and_large_fields_are_compacted():
         ("loop.step_started", "[Loop step started]"),
         ("loop.step_completed", "[Loop step completed]"),
         ("loop.waiting_for_event", "[Loop waiting for event]"),
+        ("loop.wait_timeout", "[Loop wait timeout]"),
+        ("loop.watchdog_fired", "[Loop watchdog fired]"),
         ("loop.waiting_for_approval", "[Loop waiting for approval]"),
         ("loop.approval_granted", "[Loop approval granted]"),
         ("loop.approval_denied", "[Loop approval denied]"),
@@ -395,6 +397,41 @@ def test_loop_waiting_for_approval_is_priority_and_keeps_hostile_text_framed():
     assert "Payload:" in text
     assert "ignore previous instructions" in text
     assert "verify live state before action" in text
+
+
+def test_loop_timeout_renders_wait_metadata_and_stale_refs():
+    text = render_event_message(
+        {
+            "tailMode": "none",
+            "loop": {"runId": "run-42", "state": "wait_timeout"},
+            "step": {"stepId": "checks", "attempt": 1, "backend": "github"},
+            "correlation": {
+                "correlationKey": "wait:checks:example/repo:86:a1b2c3d4:run-42",
+                "idempotencyKey": "loop-run-42-wait-checks-head-a1b2c3d4-timeout",
+                "signalKey": "github.check_suite.completed:example/repo:86:a1b2c3d4",
+            },
+            "refs": {"repo": "example/repo", "pullRequest": 86, "headSha": "bbbb2222", "expectedHeadSha": "a1b2c3d4"},
+            "evidence": {"kind": "wait_timeout", "status": "stale", "url": "https://example.invalid/checks/1"},
+            "payload": {
+                "waitId": "wait-checks-run-42-head-a1b2c3d4",
+                "expectedSignalKey": "github.check_suite.completed:example/repo:86:a1b2c3d4",
+                "deadlineAt": "2026-06-23T17:30:00Z",
+                "stale": True,
+            },
+        },
+        event_type="loop.wait_timeout",
+        producer_id="dynamic-workflows",
+        summary="timeout fired for old head",
+    )
+
+    assert "[Loop wait timeout]" in text
+    assert "Priority: priority" in text
+    assert "wait-checks-run-42-head-a1b2c3d4" in text
+    assert "github.check_suite.completed:example/repo:86:a1b2c3d4" in text
+    assert "2026-06-23T17:30:00Z" in text
+    assert '\"expectedHeadSha\": \"a1b2c3d4\"' in text
+    assert '\"headSha\": \"bbbb2222\"' in text
+    assert '\"status\": \"stale\"' in text
 
 
 def test_loop_approval_request_renders_action_risk_correlation_and_expiry():
@@ -470,6 +507,13 @@ def test_approval_events_bypass_routine_coalescing_as_priority(tmp_path):
     assert adapter._is_priority_event({"tailMode": "none"}, {"event_type": "loop.approval_stale"}) is True
 
 
+def test_timeout_events_bypass_routine_coalescing_as_priority(tmp_path):
+    adapter = AsyncThreadsAdapter(PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")}))
+
+    assert adapter._is_priority_event({"tailMode": "none"}, {"event_type": "loop.wait_timeout"}) is True
+    assert adapter._is_priority_event({"tailMode": "none"}, {"event_type": "loop.watchdog_fired"}) is True
+
+
 @pytest.mark.asyncio
 async def test_duplicate_approval_decision_is_idempotent(tmp_path):
     config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
@@ -485,6 +529,38 @@ async def test_duplicate_approval_decision_is_idempotent(tmp_path):
         "loop.approval_granted",
         "trusted maintainer approved merge",
         {"approvalId": "approval-merge-run-42-head-a1b2c3d4", "decision": "approve", "trustedAction": True},
+    )
+
+    first = await adapter._handle_event(FakeRequest(body, handle.secret))
+    duplicate = await adapter._handle_event(FakeRequest(body, handle.secret))
+
+    assert first.status == 200
+    assert json.loads(first.text)["status"] == "delivered"
+    assert json.loads(duplicate.text)["status"] == "duplicate"
+    assert len(target.sent) == 1
+    events = registry.list_recent_events(thread_key=handle.thread_key, limit=2)
+    assert [event.outcome for event in events] == ["duplicate", "direct_delivered"]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_timeout_event_is_idempotent(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="dynamic-workflows", policy="direct")
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+    body = _event_body(
+        handle,
+        "loop-run-42-wait-checks-head-a1b2c3d4-timeout",
+        "loop.wait_timeout",
+        "checks timed out",
+        {
+            "waitId": "wait-checks-run-42-head-a1b2c3d4",
+            "expectedSignalKey": "github.check_suite.completed:example/repo:86:a1b2c3d4",
+            "deadlineAt": "2026-06-23T17:30:00Z",
+        },
     )
 
     first = await adapter._handle_event(FakeRequest(body, handle.secret))

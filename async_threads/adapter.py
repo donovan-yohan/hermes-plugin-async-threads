@@ -673,7 +673,7 @@ def _build_adapter_base():
             event_type = str(fields.get("event_type", "")).lower().replace("-", "_")
             if any(
                 marker in event_type
-                for marker in ("finished", "completed", "succeeded", "done", "failed", "failure", "error", "blocked", "needs_attention", "approval")
+                for marker in ("finished", "completed", "succeeded", "done", "failed", "failure", "error", "blocked", "needs_attention", "approval", "timeout", "watchdog")
             ):
                 return True
             if tail_mode_from_event(data) == "debug":
