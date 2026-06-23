@@ -48,7 +48,13 @@ class AthFinalizerAdapter:
 
         handle = self.registry.get_handle(thread_key)
         if handle is None:
-            removed_secret_material = remove_secret_artifact(thread_key, root=self.secret_root)
+            # If this adapter is owner-scoped, an absent registry row means
+            # ownership cannot be established. Leave any stale local artifacts in
+            # place for an unscoped/admin cleanup path instead of deleting files
+            # for a possibly foreign listener.
+            removed_secret_material = (
+                False if self.owner_user_id else remove_secret_artifact(thread_key, root=self.secret_root)
+            )
             return {
                 "ok": True,
                 "summary": "ATH listener already absent",
