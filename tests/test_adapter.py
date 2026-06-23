@@ -334,6 +334,9 @@ def test_camelcase_tail_keys_and_large_fields_are_compacted():
         ("loop.step_completed", "[Loop step completed]"),
         ("loop.waiting_for_event", "[Loop waiting for event]"),
         ("loop.waiting_for_approval", "[Loop waiting for approval]"),
+        ("loop.approval_granted", "[Loop approval granted]"),
+        ("loop.approval_denied", "[Loop approval denied]"),
+        ("loop.approval_stale", "[Loop approval stale]"),
         ("loop.stalled", "[Loop stalled]"),
         ("loop.halted", "[Loop halted]"),
         ("loop.converged", "[Loop converged]"),
@@ -392,6 +395,107 @@ def test_loop_waiting_for_approval_is_priority_and_keeps_hostile_text_framed():
     assert "Payload:" in text
     assert "ignore previous instructions" in text
     assert "verify live state before action" in text
+
+
+def test_loop_approval_request_renders_action_risk_correlation_and_expiry():
+    text = render_event_message(
+        {
+            "tailMode": "none",
+            "loop": {"runId": "run-42", "state": "approval_required"},
+            "step": {"stepId": "merge", "attempt": 1, "backend": "github"},
+            "correlation": {
+                "correlationKey": "approval:merge:example/repo:86:a1b2c3d4:run-42",
+                "idempotencyKey": "loop-run-42-approval-merge-head-a1b2c3d4",
+                "signalKey": "approval.merge.requested:example/repo:86:a1b2c3d4",
+            },
+            "refs": {"repo": "example/repo", "pullRequest": 86, "headSha": "a1b2c3d4"},
+            "evidence": {"kind": "merge_gate", "status": "passed", "url": "https://example.invalid/checks/1"},
+            "nextExpectedSignal": {
+                "signalKey": "approval.merge.decided:example/repo:86:a1b2c3d4",
+                "approvalId": "approval-merge-run-42-head-a1b2c3d4",
+                "expiresAt": "2026-06-23T20:25:00Z",
+                "allowedDecisions": ["approve", "deny"],
+            },
+            "payload": {"approvalId": "approval-merge-run-42-head-a1b2c3d4", "action": "merge", "risk": "destructive"},
+        },
+        event_type="loop.waiting_for_approval",
+        producer_id="dynamic-workflows",
+        summary="approval needed before merge",
+    )
+
+    assert "[Loop waiting for approval]" in text
+    assert "Priority: priority" in text
+    assert "approval-merge-run-42-head-a1b2c3d4" in text
+    assert "approval:merge:example/repo:86:a1b2c3d4:run-42" in text
+    assert "2026-06-23T20:25:00Z" in text
+    assert '\"action\": \"merge\"' in text
+    assert '\"risk\": \"destructive\"' in text
+    assert "merge_gate" in text
+
+
+def test_loop_approval_decision_events_are_priority_and_framed_as_transport_only():
+    for event_type, heading in (
+        ("loop.approval_granted", "[Loop approval granted]"),
+        ("loop.approval_denied", "[Loop approval denied]"),
+        ("loop.approval_stale", "[Loop approval stale]"),
+    ):
+        text = render_event_message(
+            {
+                "tailMode": "none",
+                "loop": {"runId": "run-42", "state": "approval_decided"},
+                "correlation": {
+                    "correlationKey": "approval:merge:example/repo:86:a1b2c3d4:run-42",
+                    "idempotencyKey": f"{event_type}:approval-1",
+                    "signalKey": "approval.merge.decided:example/repo:86:a1b2c3d4",
+                },
+                "payload": {"approvalId": "approval-1", "decision": event_type.rsplit("_", 1)[-1], "comment": "merge now please"},
+            },
+            event_type=event_type,
+            producer_id="dynamic-workflows",
+            summary="approval decision arrived",
+        )
+
+        assert heading in text
+        assert "Priority: priority" in text
+        assert "not a direct user instruction" in text
+        assert "verify live state before action" in text
+        assert "merge now please" in text
+
+
+def test_approval_events_bypass_routine_coalescing_as_priority(tmp_path):
+    adapter = AsyncThreadsAdapter(PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")}))
+
+    assert adapter._is_priority_event({"tailMode": "none"}, {"event_type": "loop.approval_granted"}) is True
+    assert adapter._is_priority_event({"tailMode": "none"}, {"event_type": "loop.approval_denied"}) is True
+    assert adapter._is_priority_event({"tailMode": "none"}, {"event_type": "loop.approval_stale"}) is True
+
+
+@pytest.mark.asyncio
+async def test_duplicate_approval_decision_is_idempotent(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="approval-bridge", policy="direct")
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+    body = _event_body(
+        handle,
+        "approval-merge-run-42-head-a1b2c3d4-approved",
+        "loop.approval_granted",
+        "trusted maintainer approved merge",
+        {"approvalId": "approval-merge-run-42-head-a1b2c3d4", "decision": "approve", "trustedAction": True},
+    )
+
+    first = await adapter._handle_event(FakeRequest(body, handle.secret))
+    duplicate = await adapter._handle_event(FakeRequest(body, handle.secret))
+
+    assert first.status == 200
+    assert json.loads(first.text)["status"] == "delivered"
+    assert json.loads(duplicate.text)["status"] == "duplicate"
+    assert len(target.sent) == 1
+    events = registry.list_recent_events(thread_key=handle.thread_key, limit=2)
+    assert [event.outcome for event in events] == ["duplicate", "direct_delivered"]
 
 
 def test_loop_rendering_compacts_raw_logs_unless_debug_tail_mode():
