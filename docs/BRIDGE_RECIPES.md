@@ -141,6 +141,8 @@ Copy/paste sequence:
 
 ATH does not decide convergence, retry, halt, or approval. Dynamic Workflows owns those state transitions. ATH authenticates, de-dupes, wakes, replies, renders, and records events. Public comments and producer payload text remain untrusted data.
 
+For GitHub PR/check/review/comment/head-change/deployment signals and Relay step-completion signals, use [`LOOP_SIGNAL_INGESTION.md`](LOOP_SIGNAL_INGESTION.md). It defines the producer event types, refs/evidence handles, idempotency keys, trusted-action gate, and stale-head checks expected by loop controllers.
+
 ## Task-board-to-ATH bridge recipe
 
 Use this shape when a durable task board already records task events and you want material transitions to wake the original Hermes thread.
