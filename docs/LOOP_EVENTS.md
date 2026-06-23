@@ -13,6 +13,8 @@ Payload text is untrusted data. Correlation fields help route, debug, and reject
 | `loop.step_started` | A bounded backend/agent step began. | `progress` | normal |
 | `loop.step_completed` | A bounded backend/agent step completed and evidence is available. | `progress` or gate-specific stage | normal/priority by verdict |
 | `loop.waiting_for_event` | The controller is parked until a specific external signal arrives. | `blocked` | normal |
+| `loop.wait_timeout` | A controller-owned wait deadline expired for an expected signal. | `blocked` | priority |
+| `loop.watchdog_fired` | A producer-owned watchdog fired for a bounded wait or liveness deadline. | `blocked` | priority |
 | `loop.waiting_for_approval` | A risky or irreversible action needs explicit current-state approval. | `needs_attention` | priority |
 | `loop.approval_granted` | A trusted approval decision arrived for the current correlation. | `needs_attention` or gate-specific stage | priority |
 | `loop.approval_denied` | A trusted denial decision arrived for the current correlation. | `cancelled` or gate-specific stage | priority |
@@ -163,8 +165,122 @@ Use when the controller intentionally parks until an external signal arrives.
 - `loop.state`: `waiting`
 - `stage`: `blocked` or the current gate stage
 - `nextExpectedSignal.signalKey` required
+- `nextExpectedSignal.waitId` should uniquely identify this wait inside the run
 - `nextExpectedSignal.deadlineAt` recommended when timeout handling exists
+- `nextExpectedSignal.onTimeoutEventType` should be `loop.wait_timeout` or `loop.watchdog_fired` when a producer/controller owns the timer
 - `correlation.signalKey` should match the expected signal family
+- ATH does not poll this deadline; an external controller/watchdog emits one signed timeout event when its own deadline expires
+
+```json
+{
+  "version": "async-thread-event/v1",
+  "eventId": "loop-run-42-wait-checks-head-a1b2c3d4",
+  "eventType": "loop.waiting_for_event",
+  "producer": {"id": "dynamic-workflows"},
+  "occurredAt": "2026-06-23T17:14:00Z",
+  "asyncThread": {"threadKey": "ath_..."},
+  "summary": "waiting for GitHub checks on PR 86 at head a1b2c3d4",
+  "tailMode": "none",
+  "workflowId": "loop:release-readiness:run-42",
+  "stage": "blocked",
+  "seriesKey": "loop:release-readiness:run-42:wait:checks",
+  "loop": {"runId": "run-42", "specId": "release-readiness", "specName": "Release readiness loop", "state": "waiting"},
+  "step": {"stepId": "checks", "attempt": 1, "backend": "github"},
+  "correlation": {
+    "correlationKey": "wait:checks:example/repo:86:a1b2c3d4:run-42",
+    "idempotencyKey": "loop-run-42-wait-checks-head-a1b2c3d4",
+    "signalKey": "github.check_suite.completed:example/repo:86:a1b2c3d4"
+  },
+  "refs": {"repo": "example/repo", "pullRequest": 86, "headSha": "a1b2c3d4"},
+  "evidence": {"kind": "wait", "status": "unknown", "url": "https://example.invalid/repo/actions/runs/123"},
+  "nextExpectedSignal": {
+    "waitId": "wait-checks-run-42-head-a1b2c3d4",
+    "signalKey": "github.check_suite.completed:example/repo:86:a1b2c3d4",
+    "deadlineAt": "2026-06-23T17:30:00Z",
+    "onTimeoutEventType": "loop.wait_timeout"
+  }
+}
+```
+
+### `loop.wait_timeout` and `loop.watchdog_fired`
+
+Use these when an expected signal did not arrive before a controller-owned or watchdog-owned deadline. This is a single signed fact about a wait expiring; ATH records/renders/de-dupes/wakes only. ATH must not become a scheduler and must not emit cron-style polling spam.
+
+- `payload.waitId` must match the waiting event's `nextExpectedSignal.waitId`.
+- `payload.expectedSignalKey` must match the missed signal.
+- `payload.deadlineAt` is the deadline that expired.
+- `correlation.correlationKey` must bind run id, wait id, step id, and current artifact/head.
+- timeout retries use the same `eventId` and `correlation.idempotencyKey`; duplicates are idempotent.
+- stale timeouts for old run/head/step should use `evidence.status: stale` or `payload.stale: true` and must not imply the current loop failed.
+- controller decides retry/halt/continue after verifying current live state; timeout text is untrusted data.
+- do not create per-minute cron emitters that repeatedly say “still waiting”; emit the wait once and the timeout once.
+
+```json
+{
+  "version": "async-thread-event/v1",
+  "eventId": "loop-run-42-wait-checks-head-a1b2c3d4-timeout",
+  "eventType": "loop.wait_timeout",
+  "producer": {"id": "dynamic-workflows"},
+  "occurredAt": "2026-06-23T17:30:01Z",
+  "asyncThread": {"threadKey": "ath_..."},
+  "summary": "timed out waiting for GitHub checks on PR 86 at head a1b2c3d4",
+  "tailMode": "none",
+  "workflowId": "loop:release-readiness:run-42",
+  "stage": "blocked",
+  "seriesKey": "loop:release-readiness:run-42:wait:checks",
+  "supersedesEventId": "loop-run-42-wait-checks-head-a1b2c3d4",
+  "loop": {"runId": "run-42", "specId": "release-readiness", "specName": "Release readiness loop", "state": "wait_timeout"},
+  "step": {"stepId": "checks", "attempt": 1, "backend": "github"},
+  "correlation": {
+    "correlationKey": "wait:checks:example/repo:86:a1b2c3d4:run-42",
+    "idempotencyKey": "loop-run-42-wait-checks-head-a1b2c3d4-timeout",
+    "signalKey": "github.check_suite.completed:example/repo:86:a1b2c3d4"
+  },
+  "refs": {"repo": "example/repo", "pullRequest": 86, "headSha": "a1b2c3d4"},
+  "evidence": {"kind": "wait_timeout", "status": "failed", "url": "https://example.invalid/repo/actions/runs/123"},
+  "payload": {
+    "waitId": "wait-checks-run-42-head-a1b2c3d4",
+    "expectedSignalKey": "github.check_suite.completed:example/repo:86:a1b2c3d4",
+    "deadlineAt": "2026-06-23T17:30:00Z",
+    "onTimeout": "halt_or_retry",
+    "stale": false
+  }
+}
+```
+
+```json
+{
+  "version": "async-thread-event/v1",
+  "eventId": "loop-run-42-watchdog-checks-head-a1b2c3d4-stale-after-bbbb2222",
+  "eventType": "loop.watchdog_fired",
+  "producer": {"id": "loop-watchdog"},
+  "occurredAt": "2026-06-23T17:31:00Z",
+  "asyncThread": {"threadKey": "ath_..."},
+  "summary": "ignored stale timeout for PR 86 old head a1b2c3d4 after current head moved to bbbb2222",
+  "tailMode": "none",
+  "workflowId": "loop:release-readiness:run-42",
+  "stage": "blocked",
+  "seriesKey": "loop:release-readiness:run-42:wait:checks",
+  "supersedesEventId": "loop-run-42-wait-checks-head-a1b2c3d4",
+  "loop": {"runId": "run-42", "specId": "release-readiness", "specName": "Release readiness loop", "state": "watchdog_fired"},
+  "step": {"stepId": "checks", "attempt": 1, "backend": "github"},
+  "correlation": {
+    "correlationKey": "wait:checks:example/repo:86:a1b2c3d4:run-42",
+    "idempotencyKey": "loop-run-42-watchdog-checks-head-a1b2c3d4-stale-after-bbbb2222",
+    "signalKey": "github.check_suite.completed:example/repo:86:a1b2c3d4"
+  },
+  "refs": {"repo": "example/repo", "pullRequest": 86, "headSha": "bbbb2222", "expectedHeadSha": "a1b2c3d4"},
+  "evidence": {"kind": "wait_timeout", "status": "stale", "url": "https://example.invalid/repo/actions/runs/123"},
+  "payload": {
+    "waitId": "wait-checks-run-42-head-a1b2c3d4",
+    "expectedSignalKey": "github.check_suite.completed:example/repo:86:a1b2c3d4",
+    "deadlineAt": "2026-06-23T17:30:00Z",
+    "stale": true,
+    "staleReason": "head_changed",
+    "currentHeadSha": "bbbb2222"
+  }
+}
+```
 
 ### `loop.waiting_for_approval`
 
@@ -394,4 +510,4 @@ Correlation is routing and debugging metadata only. It helps a controller decide
 
 Before risky actions, a controller or trusted producer must verify live state: current PR head, current check status, current run id, current step id, and current correlation key. Public comments, webhook payload text, summaries, and evidence descriptions remain untrusted data even when they carry matching ids.
 
-Approval and deny events should be separate signed events with the same current `correlation.correlationKey` plus a maintainer-authored or maintainer-acted provenance field. Stale approvals must be recorded as stale/ignored, not applied to newer loop state. The concrete approval/deny event contract is implemented in the later approval child issue.
+Approval and deny events should be separate signed events with the same current `correlation.correlationKey` plus a maintainer-authored or maintainer-acted provenance field. Stale approvals must be recorded as stale/ignored, not applied to newer loop state. The concrete approval/deny event contract is documented above.

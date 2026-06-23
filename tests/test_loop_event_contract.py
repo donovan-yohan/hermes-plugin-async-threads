@@ -17,6 +17,8 @@ LOOP_EVENT_TYPES = {
     "loop.step_started",
     "loop.step_completed",
     "loop.waiting_for_event",
+    "loop.wait_timeout",
+    "loop.watchdog_fired",
     "loop.waiting_for_approval",
     "loop.approval_granted",
     "loop.approval_denied",
@@ -73,6 +75,31 @@ def test_loop_event_examples_cover_correlation_evidence_and_next_signal_fields()
         "nextExpectedSignal",
     ):
         assert required in joined
+
+
+def test_loop_timeout_contract_rejects_cron_spam_and_covers_stale_timeouts():
+    text = _loop_doc_text()
+    examples = {example["eventType"]: example for example in _event_examples()}
+    waiting = examples["loop.waiting_for_event"]
+    timeout = examples["loop.wait_timeout"]
+    watchdog = examples["loop.watchdog_fired"]
+
+    assert waiting["nextExpectedSignal"]["waitId"] == "wait-checks-run-42-head-a1b2c3d4"
+    assert waiting["nextExpectedSignal"]["signalKey"] == "github.check_suite.completed:example/repo:86:a1b2c3d4"
+    assert waiting["nextExpectedSignal"]["deadlineAt"] == "2026-06-23T17:30:00Z"
+    assert waiting["nextExpectedSignal"]["onTimeoutEventType"] == "loop.wait_timeout"
+    assert timeout["payload"]["waitId"] == waiting["nextExpectedSignal"]["waitId"]
+    assert timeout["payload"]["expectedSignalKey"] == waiting["nextExpectedSignal"]["signalKey"]
+    assert timeout["payload"]["deadlineAt"] == waiting["nextExpectedSignal"]["deadlineAt"]
+    assert timeout["correlation"]["idempotencyKey"] == timeout["eventId"]
+    assert timeout["payload"]["stale"] is False
+    assert watchdog["evidence"]["status"] == "stale"
+    assert watchdog["payload"]["stale"] is True
+    assert watchdog["refs"]["expectedHeadSha"] == "a1b2c3d4"
+    assert watchdog["refs"]["headSha"] == "bbbb2222"
+    assert "ATH does not poll this deadline" in text
+    assert "must not become a scheduler" in text
+    assert "cron-style polling spam" in text
 
 
 def test_loop_approval_contract_covers_stale_protection_and_idempotent_decisions():
