@@ -52,7 +52,7 @@ The diagram above is intentionally scoped to the current MVP: gateway-local disp
 
 ## Quickstart
 
-See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for install/config and a complete agent-first signed demo workflow. See [`docs/EVENT_CONTRACT.md`](docs/EVENT_CONTRACT.md) for the producer-facing event contract and JSON Schema. See [`docs/BRIDGE_RECIPES.md`](docs/BRIDGE_RECIPES.md) for task-board bridge, emit-command, lifecycle, supersession, trace, and prune recipes. See [`skills/async-thread-agent-tools/SKILL.md`](skills/async-thread-agent-tools/SKILL.md) for the reusable Hermes agent skill.
+See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for install/config and a complete agent-first signed demo workflow. See [`docs/EVENT_CONTRACT.md`](docs/EVENT_CONTRACT.md) for the producer-facing event contract and JSON Schema. See [`docs/BRIDGE_RECIPES.md`](docs/BRIDGE_RECIPES.md) for task-board bridge, emit-command, lifecycle, supersession, trace, and prune recipes. See [`skills/async-thread-agent-tools/SKILL.md`](skills/async-thread-agent-tools/SKILL.md) for the reusable Hermes agent skill. For feedback-controller loops, see [`docs/LOOP_EVENTS.md`](docs/LOOP_EVENTS.md) (event contract), [`docs/LOOP_SIGNAL_INGESTION.md`](docs/LOOP_SIGNAL_INGESTION.md) (GitHub/Relay signal recipes), [`docs/LOOP_SCENARIO_HARNESS.md`](docs/LOOP_SCENARIO_HARNESS.md) (CI-runnable sample loop), and [`docs/LOOP_DOGFOOD.md`](docs/LOOP_DOGFOOD.md) (coordinated dogfood evidence and live dry-run checklist).
 
 Normal user ask:
 
@@ -126,7 +126,8 @@ See [`docs/SECURITY.md`](docs/SECURITY.md) for more detail.
 - explicit agent-queue continuation policy metadata, with fail-closed mode when hard Hermes core bounds are required;
 - producer helper script for compact background-lane events;
 - model-facing producer handoff generation for generic contracts, local emitter files, GitHub Actions recipes, and explicit debug emitters;
-- benchmarkable synthetic agent-tool scenarios for PR review lanes, local long jobs, external producers, and debug/admin workflows.
+- benchmarkable synthetic agent-tool scenarios for PR review lanes, local long jobs, external producers, and debug/admin workflows;
+- `loop.*` event contract, GitHub/Relay signal-ingestion recipes, approval/timeout/watchdog conventions, and a CI-runnable end-to-end loop-signal scenario harness (start → wait → signal → resume → approval-or-terminal → evidence, plus duplicate/stale/timeout cases and a deterministic dogfood evidence bundle) for feedback-controller loops.
 
 ## Known limitations
 
