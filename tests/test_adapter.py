@@ -82,6 +82,18 @@ class HoldFirstDigestTargetAdapter(FakeTargetAdapter):
             self.second_entered.set()
 
 
+@pytest.mark.asyncio
+async def test_connect_accepts_gateway_reconnect_keyword(tmp_path):
+    config = PlatformConfig(
+        enabled=True,
+        extra={"registry_path": str(tmp_path / "ath.sqlite3"), "host": "127.0.0.1", "port": 0},
+    )
+    adapter = AsyncThreadsAdapter(config)
+
+    assert await adapter.connect(is_reconnect=True) is True
+    await adapter.disconnect()
+
+
 class FakeRequest:
     def __init__(self, body: bytes, secret: str):
         digest = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
