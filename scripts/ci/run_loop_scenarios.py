@@ -19,7 +19,7 @@ event. Convergence, merge, halt, and stale rejection are controller decisions;
 ATH only transports signals and visibility.
 
 The ``--json`` report and ``--dogfood`` evidence bundle are public-safe (no
-secrets, no raw logs) and intended for PR review. See ``docs/LOOP_DOGFOOD.md``
+secrets, no raw logs) and intended for PR review. See ``docs/LOOP_EVIDENCE.md``
 for the live dry-run checklist when a disposable PR/thread is available.
 """
 
