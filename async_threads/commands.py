@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 from .adapter import registry_from_config, registry_path_from_config
+from .kanban import dry_run_kanban_source_binding, kanban_read_failed_report
 from .listeners import ListenValidationError, create_listener
 from .origin import remember_gateway_origin
 from .privacy import redact_metadata_text, redact_secret_text, safe_event_id
@@ -31,6 +32,7 @@ commands:
   /ath lifecycle [thread_key]
   /ath prune [--dry-run|--force] [--event-log-days N] [--seen-days N]
   /ath bind-source <source> <thread_key> [--board board] [--source-ref k=v,...] [--producer id] [--events a,b] [--policy agent_queue|direct]
+  /ath dry-run-binding <binding_id> [--db path] [--since N] [--limit N] [--json]
   /ath bindings [--source source] [--include-retired]
   /ath inspect-binding <binding_id>
   /ath pause-binding <binding_id>
@@ -116,6 +118,8 @@ def _run_command(raw_args: str, *, event: Any, gateway: Any) -> str:
         return _cmd_prune(registry, argv[1:], config=config, owner_user_id=owner_user_id)
     if command in {"bind-source", "bind_source"}:
         return _cmd_bind_source(registry, argv[1:], owner_user_id=owner_user_id)
+    if command in {"dry-run-binding", "dry_run_binding", "preview-binding", "preview_binding"} and len(argv) >= 2:
+        return _cmd_dry_run_binding(registry, argv[1], argv[2:], owner_user_id=owner_user_id)
     if command in {"bindings", "source-bindings", "source_bindings"}:
         return _cmd_bindings(registry, argv[1:], owner_user_id=owner_user_id)
     if command in {"inspect-binding", "inspect_binding"} and len(argv) >= 2:
@@ -618,6 +622,78 @@ def _cmd_bind_source(registry: Any, args: list[str], *, owner_user_id: str) -> s
         f"filter: {_format_binding_map(binding.event_filter)}\n"
         f"status: `{binding.status}` compatibility=`{_display_text(compatibility.get('reason'), 80)}` failClosed=`{compatibility.get('failClosed')}`"
     )
+
+
+def _cmd_dry_run_binding(registry: Any, binding_id: str, args: list[str], *, owner_user_id: str) -> str:
+    if not owner_user_id:
+        return "async-thread source binding not found."
+    binding = registry.get_source_binding(binding_id=binding_id, owner_user_id=owner_user_id)
+    if binding is None:
+        return "async-thread source binding not found."
+    board_db_path = ""
+    since_event_id: int | None = None
+    limit = 100
+    as_json = False
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--db" and i + 1 < len(args):
+            board_db_path = args[i + 1]
+            i += 2
+            continue
+        if arg == "--since" and i + 1 < len(args):
+            try:
+                since_event_id = max(0, int(args[i + 1]))
+            except ValueError:
+                return "invalid --since event id. use a non-negative integer."
+            i += 2
+            continue
+        if arg == "--limit" and i + 1 < len(args):
+            try:
+                limit = max(1, min(int(args[i + 1]), 500))
+            except ValueError:
+                return "invalid --limit. use an integer 1-500."
+            i += 2
+            continue
+        if arg == "--json":
+            as_json = True
+            i += 1
+            continue
+        return "usage: /ath dry-run-binding <binding_id> [--db path] [--since N] [--limit N] [--json]"
+    try:
+        report = dry_run_kanban_source_binding(
+            registry=registry,
+            binding=binding,
+            board_db_path=board_db_path or None,
+            since_event_id=since_event_id,
+            limit=limit,
+        )
+    except (OSError, ValueError) as exc:
+        report = kanban_read_failed_report(binding, exc)
+    if as_json:
+        return json.dumps(report, sort_keys=True, indent=2)
+    counts = report.get("counts", {}) if isinstance(report, dict) else {}
+    cursor = report.get("cursor", {}) if isinstance(report, dict) else {}
+    lines = [
+        "async-thread source binding dry-run",
+        f"bindingId: `{_display_metadata(binding.binding_id, 80)}`",
+        f"source: `{_display_metadata(binding.source, 40)}` board=`{_display_metadata(report.get('board', ''), 80)}`",
+        f"would_emit: {counts.get('would_emit', 0)} suppressed: {counts.get('suppressed', 0)} would_coalesce: {counts.get('would_coalesce', 0)} invalid_binding: {counts.get('invalid_binding', 0)}",
+    ]
+    if cursor:
+        lines.append(f"cursor: from={cursor.get('fromEventId')} wouldAdvanceTo={cursor.get('wouldAdvanceToEventId')} advanced=false")
+    for item in list(report.get("events", []))[:10]:
+        action = _display_text(item.get("action", ""), 40)
+        event_id = _display_metadata(item.get("eventId", item.get("upstreamEventId", "")), 80)
+        event_type = _display_metadata(item.get("eventType", item.get("digestEventType", "")), 80)
+        reason = _display_text(item.get("reason", ""), 80)
+        reason_text = f" reason={reason}" if reason else ""
+        type_text = f" type={event_type}" if event_type else ""
+        lines.append(f"- {action} id={event_id}{type_text}{reason_text}")
+    if len(report.get("events", [])) > 10:
+        lines.append(f"... {len(report.get('events', [])) - 10} more events omitted; rerun with --json for full dry-run data.")
+    lines.append("dry-run only: no events sent and cursor was not advanced.")
+    return "\n".join(lines)
 
 
 def _cmd_bindings(registry: Any, args: list[str], *, owner_user_id: str) -> str:

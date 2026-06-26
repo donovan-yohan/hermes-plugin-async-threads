@@ -93,5 +93,6 @@ def test_root_plugin_registers_platform_hook_and_command():
         "ath_list_source_bindings",
         "ath_get_source_binding",
         "ath_set_source_binding_status",
+        "ath_dry_run_source_binding",
     }
     assert {tool["toolset"] for tool in ctx.tools} == {"plugin_async_threads"}
