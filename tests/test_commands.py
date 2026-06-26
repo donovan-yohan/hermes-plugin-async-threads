@@ -530,8 +530,8 @@ def test_emit_command_template_is_owner_scoped_and_does_not_print_secret(tmp_pat
     assert handle.thread_key in output
     assert handle.secret not in output
     assert "ATH_SECRET_FILE" in output
-    assert "urllib.error.HTTPError" in output
-    assert "urllib.error.URLError" in output
+    assert "async_threads.emitter" in output
+    assert "ATH_SECRET=$(cat" not in output
     assert _cmd_emit_command(registry, handle.thread_key, ["--event", "demo.job.finished"], gateway=gateway, owner_user_id="other") == "async-thread listener not found."
 
 
