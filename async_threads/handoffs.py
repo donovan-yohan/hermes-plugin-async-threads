@@ -115,6 +115,8 @@ def write_handoff_files(
     config = {
         "version": HANDOFF_VERSION,
         "mode": mode,
+        "helperModule": "async_threads.emitter",
+        "helperPythonPath": str(Path(__file__).resolve().parents[1]),
         "url": event_url,
         "threadKey": handle.thread_key,
         "producerId": handle.producer_id,
@@ -214,6 +216,7 @@ def _contract_summary(handle: AsyncThreadHandle, *, event_url: str, event_type: 
         "secretFile": secret_ref.get("secretFile", ""),
         "contractFile": secret_ref.get("contractFile", ""),
         "signature": "HMAC-SHA256 over exact UTF-8 JSON bytes using exact ATH_SECRET_FILE contents",
+        "helperModule": "async_threads.emitter",
         "headers": {"Content-Type": "application/json", "X-Hermes-Signature-256": "sha256=<hex>"},
     }
 
@@ -466,53 +469,44 @@ def _emitter_script() -> str:
     return """#!/usr/bin/env python3
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
 
 config_path = os.environ.get("ATH_HANDOFF_CONFIG")
 if not config_path:
     raise SystemExit("ATH_HANDOFF_CONFIG is required")
 with open(config_path, "r", encoding="utf-8") as fh:
     config = json.load(fh)
+helper_python_path = config.get("helperPythonPath")
+if helper_python_path and helper_python_path not in sys.path:
+    sys.path.insert(0, helper_python_path)
+from async_threads.emitter import build_event_envelope, emit_event, exit_code_for_result
+
 secret_file = os.environ.get("ATH_SECRET_FILE") or config["secretFile"]
-with open(secret_file, "r", encoding="utf-8") as fh:
-    secret = fh.read()
 
 event_type = os.environ.get("ATH_EVENT_TYPE") or config["defaultEventType"]
-event_id = os.environ.get("ATH_EVENT_ID") or f"{config['producerId']}-{event_type}-{int(time.time())}"
-summary = os.environ.get("ATH_SUMMARY") or f"{event_type} finished"
-status = os.environ.get("ATH_STATUS") or "passed"
-body = {
-    "version": "async-thread-event/v1",
-    "eventId": event_id,
-    "eventType": event_type,
-    "producer": {"id": config["producerId"]},
-    "occurredAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    "asyncThread": {"threadKey": config["threadKey"]},
-    "summary": summary,
-    "tailMode": os.environ.get("ATH_TAIL_MODE", "compact"),
-    "payload": {"status": status},
-}
-raw = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
-sig = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).hexdigest()
-req = urllib.request.Request(
-    os.environ.get("ATH_URL") or config["url"],
-    data=raw,
-    method="POST",
-    headers={"Content-Type": "application/json", "X-Hermes-Signature-256": f"sha256={sig}"},
+event = build_event_envelope(
+    thread_key=config["threadKey"],
+    producer_id=config["producerId"],
+    event_id=os.environ.get("ATH_EVENT_ID") or f"{config['producerId']}-{event_type}-{int(time.time())}",
+    event_type=event_type,
+    occurred_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    summary=os.environ.get("ATH_SUMMARY") or f"{event_type} finished",
+    tail_mode=os.environ.get("ATH_TAIL_MODE", "compact"),
+    payload={"status": os.environ.get("ATH_STATUS") or "passed"},
 )
-try:
-    with urllib.request.urlopen(req, timeout=float(os.environ.get("ATH_TIMEOUT", "20"))) as res:
-        print(res.status, res.read().decode("utf-8", "replace"))
-except urllib.error.HTTPError as err:
-    print(f"HTTP {err.code}: {err.read().decode('utf-8', 'replace')}", file=sys.stderr)
-    raise SystemExit(1)
+result = emit_event(
+    os.environ.get("ATH_URL") or config["url"],
+    event,
+    secret_file=secret_file,
+    timeout=float(os.environ.get("ATH_TIMEOUT", "20")),
+    dry_run=os.environ.get("ATH_DRY_RUN", "").lower() in {"1", "true", "yes"} or os.environ.get("ATH_VALIDATE_ONLY", "").lower() in {"1", "true", "yes"},
+)
+public = result.to_public_dict() if hasattr(result, "to_public_dict") else result
+print(json.dumps(public, sort_keys=True))
+raise SystemExit(exit_code_for_result(result))
 """
 
 

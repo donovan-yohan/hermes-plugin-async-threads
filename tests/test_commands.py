@@ -1,3 +1,6 @@
+import json
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -530,9 +533,51 @@ def test_emit_command_template_is_owner_scoped_and_does_not_print_secret(tmp_pat
     assert handle.thread_key in output
     assert handle.secret not in output
     assert "ATH_SECRET_FILE" in output
-    assert "urllib.error.HTTPError" in output
-    assert "urllib.error.URLError" in output
+    assert "Python standard library" in output
+    assert "async_threads.emitter" not in output
+    assert "ATH_SECRET=$(cat" not in output
     assert _cmd_emit_command(registry, handle.thread_key, ["--event", "demo.job.finished"], gateway=gateway, owner_user_id="other") == "async-thread listener not found."
+
+
+def test_emit_command_template_runs_without_async_threads_import_in_clean_cwd(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    handle = registry.create_handle(
+        source={"platform": "discord", "chat_id": "c", "chat_type": "channel", "thread_id": "t"},
+        producer_id="demo",
+        owner_user_id="u1",
+    )
+    gateway = SimpleNamespace(adapters={}, config=SimpleNamespace(), session_store=None)
+    output = _cmd_emit_command(
+        registry,
+        handle.thread_key,
+        ["--event", "demo.job.finished"],
+        gateway=gateway,
+        owner_user_id="u1",
+    )
+    payload = output.split("python3 - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
+    missing_secret = tmp_path / "sandbox" / "missing-secret.txt"
+
+    result = subprocess.run(
+        [sys.executable, "-c", payload],
+        cwd=tmp_path,
+        env={
+            "ATH_URL": "https://ath.example.invalid/events",
+            "ATH_THREAD_KEY": handle.thread_key,
+            "ATH_PRODUCER_ID": handle.producer_id,
+            "ATH_SECRET_FILE": str(missing_secret),
+        },
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "ModuleNotFoundError" not in result.stderr
+    public = json.loads(result.stdout)
+    assert public["status"] == "local_config_error"
+    assert public["retryable"] is False
+    assert "missing-secret.txt" in public["error"]
 
 
 def test_lifecycle_command_documents_retirement_and_trace(tmp_path):

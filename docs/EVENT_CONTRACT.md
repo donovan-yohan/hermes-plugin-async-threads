@@ -179,6 +179,11 @@ Idempotency means the producer can retry safely without creating duplicate visib
 
 A producer bridge should do all of this:
 
+- Prefer the reusable Python helper (`async_threads.emitter`) when the producer
+  can import this package. It builds the v1 envelope, emits canonical UTF-8 JSON
+  bytes, signs from `ATH_SECRET_FILE`, classifies duplicate responses as
+  successful, marks `502`/transport failures as retryable with the same
+  `eventId`, and exposes validate/dry-run metadata without raw secret bytes.
 - Store `threadKey`, receiver URL, producer id, allowed event types, and HMAC secret outside the event payload.
 - Build the JSON body once, encode it as UTF-8 bytes, and sign those exact bytes.
 - Generate stable `eventId` values from the upstream event id, job id, commit sha, run id, or attempt id.
