@@ -97,6 +97,21 @@ A workflow workbench is one motivating producer, but the Hermes plugin should st
 
 The event receiver must authenticate producers, de-dupe events, validate route scope, and avoid prompt-injection from untrusted payload text.
 
+### 7. Producer-agnostic source bindings
+
+An operator should be able to bind a durable upstream source to an existing async-thread listener without writing a repo-local watcher. A source binding records:
+
+- `source`, such as `kanban`, `github`, `ci`, `local`, or `custom`;
+- `sourceRef`, such as a board, task, repo, run, or device reference;
+- listener thread key and producer scope;
+- material-transition filter;
+- trusted transform name/options, never arbitrary prompt text;
+- cursor/idempotency state;
+- optional coalescing/digest policy;
+- delivery policy metadata.
+
+For Kanban dogfood, the normal path is `task_events -> material-transition filter -> safe transform -> signed async-thread-event/v1 -> same conversation`. The native source-binding runner/cursor owns replay safety. Cron polling is not the product path; keep it as an emergency fallback only when the native runner or a future push hook cannot be deployed.
+
 ## Non-goals
 
 - Do not make producers speak directly to every chat platform. Hermes gateway owns Discord/Telegram/etc. delivery.
@@ -267,7 +282,26 @@ A useful MVP can be small:
 5. Agent-continuation mode with untrusted payload boxing plus explicit continuation policy metadata.
 6. One producer example: job finished / needs attention / blocked.
 7. CLI command to register/list/revoke async threads.
-8. Tests for signature validation, de-dupe, prompt injection boundary, origin routing, and fallback behavior.
+8. Source-binding registry/admin UX for binding Kanban board `ath` to listener `ath_mg3BQeDs15Gm4DnF` without exposing raw HMAC secrets.
+9. Dry-run and diagnostics for binding compatibility, upstream cursor, `would_emit`, `suppressed`, `would_coalesce`, `invalid_binding`, outbox status, and event trace.
+10. Tests for signature validation, de-dupe, prompt injection boundary, origin routing, source-binding transform safety, and fallback behavior.
+
+## Kanban source-binding defaults
+
+Kanban is the first reference adapter because the shared board already persists durable `task_events`. Its default material transitions are:
+
+- `kanban.task.blocked`
+- `kanban.task.completed`
+- `kanban.task.crashed`
+- `kanban.task.gave_up`
+- `kanban.task.timed_out`
+- `kanban.task.ready_for_review` for review-required blocker states
+
+Routine `commented`, `heartbeat`, `claimed`, `spawned`, and `promoted` rows should be suppressed by default or coalesced into an explicit digest event. They must not wake every mapped conversation or launch unbounded agent runs.
+
+The default idempotency key is `<board>:<task_id>:<task_event_id>`. The default series/workflow key is `kanban:<board>:<task_id>`. The safe envelope includes task id, title, assignee, status, priority, compact status facts, event kind, task-event id, run id, and redacted short reason/error/outcome text. It must not include task bodies, raw comments, full logs, transcripts, credentials, cookies, raw headers, or prompt text telling Hermes what to do.
+
+The intended dogfood binding is board `ath` to listener `ath_mg3BQeDs15Gm4DnF` with producer `ath-kanban-bridge` and the material event allowlist above. Operators should dry-run the binding before enabling the native runner, then use binding inspection and `ath_trace_event`/`/ath trace` to diagnose one event at a time.
 
 ## Success criteria
 
@@ -282,6 +316,7 @@ A useful MVP can be small:
 ## Anti-patterns to avoid
 
 - Cron jobs that poll forever and need cleanup.
+- Treating cron polling as the intended source-binding architecture instead of an emergency fallback.
 - Per-workflow ad hoc scripts with hardcoded Discord channel/thread ids.
 - Producers posting directly to chat platforms instead of emitting events to Hermes.
 - Webhook routes that dump raw JSON into an unconstrained agent prompt.
