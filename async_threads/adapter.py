@@ -14,6 +14,7 @@ from .registry import AsyncThreadHandle, AsyncThreadRegistry, safe_session_key_h
 from .rendering import render_event_message, tail_mode_from_event
 from .routing import send_metadata_for_source
 from .secrets import remove_secret_artifact, secret_root_from_config
+from .source_runner import SourceBindingRunConfig, run_source_binding_once
 from .security import (
     DEFAULT_REPLAY_WINDOW_SECONDS,
     EventValidationError,
@@ -46,9 +47,28 @@ def validate_config(config: Any) -> bool:
     extra = getattr(config, "extra", {}) or {}
     try:
         int(extra.get("port", 8765))
+        int(extra.get("source_binding_runner_interval_seconds", 30))
+        int(extra.get("source_binding_runner_limit", 100))
     except (TypeError, ValueError):
         return False
     return True
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def _event_url_from_config(config: Any, *, host: str, port: int) -> str:
+    extra = getattr(config, "extra", {}) or {}
+    configured = extra.get("source_binding_event_url") or extra.get("event_url")
+    if configured:
+        return str(configured)
+    public_base = str(extra.get("public_base_url") or "").rstrip("/")
+    if public_base:
+        return f"{public_base}/async-threads/v1/events"
+    return f"http://{host}:{port}/async-threads/v1/events"
 
 
 def registry_path_from_config(config: Any) -> Path:
@@ -161,6 +181,13 @@ def _build_adapter_base():
             self._coalesced_events: dict[str, list[dict[str, Any]]] = {}
             self._coalesced_inflight: dict[str, list[dict[str, Any]]] = {}
             self._coalesce_tasks: dict[str, asyncio.Task] = {}
+            self._source_binding_runner_enabled = _truthy((config.extra or {}).get("source_binding_runner_enabled", False))
+            self._source_binding_runner_interval_seconds = max(
+                1,
+                int((config.extra or {}).get("source_binding_runner_interval_seconds", 30)),
+            )
+            self._source_binding_runner_limit = max(1, min(int((config.extra or {}).get("source_binding_runner_limit", 100)), 500))
+            self._source_binding_runner_task: asyncio.Task | None = None
 
         async def connect(self) -> bool:
             from aiohttp import web
@@ -173,6 +200,8 @@ def _build_adapter_base():
             self._site = web.TCPSite(self._runner, self._host, self._port)
             await self._site.start()
             self._running = True
+            if self._source_binding_runner_enabled:
+                self._source_binding_runner_task = asyncio.create_task(self._source_binding_runner_loop())
             logger.info("Async Threads receiver listening on %s:%s", self._host, self._port)
             return True
 
@@ -184,6 +213,13 @@ def _build_adapter_base():
             if self._runner is not None:
                 await self._runner.cleanup()
                 self._runner = None
+            if self._source_binding_runner_task is not None:
+                self._source_binding_runner_task.cancel()
+                try:
+                    await self._source_binding_runner_task
+                except asyncio.CancelledError:
+                    pass
+                self._source_binding_runner_task = None
             for task in list(self._coalesce_tasks.values()):
                 task.cancel()
             for pending in list(self._coalesced_events.values()) + list(self._coalesced_inflight.values()):
@@ -202,10 +238,50 @@ def _build_adapter_base():
         async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
             return {"id": chat_id, "type": "async_threads", "name": "Async Threads"}
 
+        async def _source_binding_runner_loop(self) -> None:
+            while self._running:
+                await self._run_source_bindings_once()
+                await asyncio.sleep(self._source_binding_runner_interval_seconds)
+
+        async def _run_source_bindings_once(self) -> list[dict[str, Any]]:
+            bindings = [
+                binding
+                for binding in self._registry.list_source_bindings(source="kanban", include_retired=False, limit=100)
+                if binding.status == "active"
+            ]
+            event_url = _event_url_from_config(self.config, host=self._host, port=self._port)
+            results: list[dict[str, Any]] = []
+            for binding in bindings:
+                cfg = SourceBindingRunConfig(
+                    event_url=event_url,
+                    limit=self._source_binding_runner_limit,
+                )
+                try:
+                    result = await asyncio.to_thread(
+                        run_source_binding_once,
+                        registry=self._registry,
+                        binding=binding,
+                        config=cfg,
+                    )
+                except Exception as exc:  # noqa: BLE001 - keep runner alive and diagnosable
+                    logger.error("async-thread source binding runner failed: %s", type(exc).__name__)
+                    result = {"ok": False, "health": "runner_error", "bindingId": binding.binding_id, "error": type(exc).__name__}
+                results.append(result)
+            return results
+
         async def _handle_health(self, request):
             from aiohttp import web
 
-            return web.json_response({"ok": True, "platform": "async_threads"})
+            return web.json_response(
+                {
+                    "ok": True,
+                    "platform": "async_threads",
+                    "sourceBindingRunner": {
+                        "enabled": self._source_binding_runner_enabled,
+                        "intervalSeconds": self._source_binding_runner_interval_seconds,
+                    },
+                }
+            )
 
         async def _handle_event(self, request):
             from aiohttp import web

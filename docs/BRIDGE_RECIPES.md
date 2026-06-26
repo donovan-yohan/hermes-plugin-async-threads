@@ -199,6 +199,19 @@ For native board integrations, persist this routing as a source binding instead 
 
 Before enabling a runner, preview the durable `task_events` cursor with `/ath dry-run-binding <binding_id> --db /path/to/kanban.db --since <event_id> --json` or the model-facing `ath_dry_run_source_binding` tool. Dry-run reports `would_emit`, `suppressed`, `would_coalesce`, and `invalid_binding`, does not POST signed events, and does not advance the binding cursor. The transform uses `eventId=<board>:<task_id>:<task_event_id>`, `seriesKey=kanban:<board>:<task_id>`, and `workflowId=kanban:<board>:<task_id>`; it omits task bodies, raw comments, transcripts, logs, and secret-shaped fields.
 
+The native gateway runner is opt-in, not a Hermes cron job. Enable it on the `async_threads` platform only after the dry-run cursor looks correct:
+
+```yaml
+platforms:
+  async_threads:
+    extra:
+      source_binding_runner_enabled: true
+      source_binding_runner_interval_seconds: 30
+      source_binding_runner_limit: 100
+```
+
+For each upstream row, the runner inserts a durable outbox row before emitting. It advances the binding cursor only after terminal-safe outcomes: `succeeded`, receiver `duplicate`, `suppressed`, or `coalesced`. Transport and `502` failures keep the row pending and retry the same ATH event id on the next runner pass; a crash after send but before mark is reconciled by the receiver's duplicate response. Listener revocation, producer mismatch, disallowed events, and strict `agent_queue` continuation fail-closed states remain diagnosable through `/ath inspect-binding` / `ath_get_source_binding` runner status instead of silently skipping work.
+
 ## Repeated artifact revisions
 
 When several events describe one logical artifact, use a stable `seriesKey` plus a revision field:
