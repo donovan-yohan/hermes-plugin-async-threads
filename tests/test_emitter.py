@@ -118,3 +118,22 @@ def test_emit_event_transport_failure_is_retryable_with_same_event_id(monkeypatc
     assert result.retryable is True
     assert result.receiver_status == "transport_error"
     assert result.to_public_dict()["status"] == "transport_error"
+
+
+@pytest.mark.parametrize("secret_text", [None, ""])
+def test_emit_event_local_secret_config_errors_are_non_retryable_public_results(tmp_path, secret_text):
+    secret_file = tmp_path / "secret.txt"
+    if secret_text is None:
+        secret_file = tmp_path / "missing-secret.txt"
+    else:
+        secret_file.write_text(secret_text, encoding="utf-8")
+
+    result = emit_event("https://ath.example.invalid/events", _event(), secret_file=secret_file)
+
+    assert result.success is False
+    assert result.retryable is False
+    assert result.receiver_status == "local_config_error"
+    public = result.to_public_dict()
+    assert public["status"] == "local_config_error"
+    assert public["retryable"] is False
+    assert public["error"]

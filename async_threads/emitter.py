@@ -219,16 +219,20 @@ def emit_event(
 ) -> EmitResult | dict[str, Any]:
     """Sign and POST an event, or return dry-run metadata without posting."""
 
-    raw = canonical_json_bytes(event)
-    if dry_run:
-        return dry_run_metadata(event=event, raw_body=raw, url=url, secret_file=secret_file)
-    resolved_secret = secret if secret is not None else read_secret_file(secret_file)
-    request = urllib.request.Request(
-        str(url),
-        data=raw,
-        method="POST",
-        headers=signed_headers(raw, resolved_secret),
-    )
+    resolved_secret = secret or ""
+    try:
+        raw = canonical_json_bytes(event)
+        if dry_run:
+            return dry_run_metadata(event=event, raw_body=raw, url=url, secret_file=secret_file)
+        resolved_secret = secret if secret is not None else read_secret_file(secret_file)
+        request = urllib.request.Request(
+            str(url),
+            data=raw,
+            method="POST",
+            headers=signed_headers(raw, resolved_secret),
+        )
+    except (EventValidationError, OSError, ValueError) as exc:
+        return _local_config_error_result(str(exc), redact_values=(resolved_secret,))
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             response_body = response.read().decode("utf-8", "replace")
@@ -248,6 +252,15 @@ def emit_event(
         return classify_receiver_response(None, None, error=str(getattr(exc, "reason", exc)), redact_values=(resolved_secret,))
     except OSError as exc:
         return classify_receiver_response(None, None, error=str(exc), redact_values=(resolved_secret,))
+
+
+def _local_config_error_result(error: str, *, redact_values: tuple[str, ...] | list[str]) -> EmitResult:
+    return EmitResult(
+        success=False,
+        retryable=False,
+        receiver_status="local_config_error",
+        error=_redact_response_text(error, redact_values=redact_values),
+    )
 
 
 def exit_code_for_result(result: EmitResult | Mapping[str, Any]) -> int:
