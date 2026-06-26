@@ -1,0 +1,5 @@
+include README.md LICENSE plugin.yaml CHANGELOG.md
+recursive-include docs *
+recursive-include examples *
+recursive-include skills *
+recursive-include tests *.py

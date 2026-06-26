@@ -1,5 +1,5 @@
 name: async-threads
-version: 0.1.0
+version: 0.2.0
 description: Event-driven async thread continuation for Hermes gateway sessions.
 author: Donovan Yohan / Hermes Agent
 kind: platform
