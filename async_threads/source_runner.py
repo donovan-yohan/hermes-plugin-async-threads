@@ -173,7 +173,7 @@ def run_source_binding_once(
             binding_id=binding.binding_id,
             upstream_event_id=event.id,
             status="pending" if retryable else "error",
-            error=str(result_dict.get("error") or result_dict.get("body") or result_dict.get("status") or "emit_failed"),
+            error=_emit_failure_diagnostic(result_dict),
             http_status=result_dict.get("httpStatus"),
             receiver_status=str(result_dict.get("status") or ""),
             increment_attempts=True,
@@ -262,6 +262,30 @@ def _emit_result_dict(result: EmitResult | Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(result, EmitResult):
         return result.to_public_dict()
     return dict(result)
+
+
+def _emit_failure_diagnostic(result: Mapping[str, Any]) -> str:
+    """Return a compact failure classification without raw receiver body text."""
+
+    try:
+        http_status = int(result.get("httpStatus"))
+    except (TypeError, ValueError):
+        http_status = None
+    parts = ["emit_failed", f"http_{http_status}" if http_status is not None else "transport_error"]
+    receiver_status = _safe_diagnostic_fragment(result.get("status"))
+    if receiver_status and receiver_status != "transport_error":
+        parts.append(receiver_status)
+    return ":".join(parts)
+
+
+def _safe_diagnostic_fragment(value: Any) -> str:
+    """Keep only short enum-like status values in durable diagnostics."""
+
+    redacted = redact_metadata_text(value, max_chars=64).strip().lower()
+    if not redacted or redacted.startswith("redacted:") or "<redacted>" in redacted or len(redacted) > 32:
+        return ""
+    normalized = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in redacted).strip("_-")
+    return normalized if normalized and len(normalized) <= 32 else ""
 
 
 def _runner_envelope(action: Mapping[str, Any]) -> dict[str, Any]:

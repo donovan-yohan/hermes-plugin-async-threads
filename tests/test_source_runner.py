@@ -145,6 +145,43 @@ def test_runner_retries_transport_failure_with_same_event_id_then_reconciles_dup
     assert status["attempts"] == 1
 
 
+def test_runner_emit_failures_do_not_persist_receiver_body_in_diagnostics(tmp_path):
+    sentinel = "ATH_TRANSCRIPT_SENTINEL_SHOULD_NOT_APPEAR_IN_DIAGNOSTICS"
+    cases = [
+        ("retryable", True, 502, "receiver_busy", "pending"),
+        ("nonretryable", False, 400, "bad", "error"),
+    ]
+
+    for name, retryable, http_status, receiver_status, expected_status in cases:
+        board_db = tmp_path / f"{name}.db"
+        _make_board_db(board_db, [("completed", {"summary": "done"}, 1700000001)])
+        registry, _listener, binding = _binding(tmp_path / name, db_path=board_db)
+
+        def leaking_emit(url, event, **kwargs):
+            return EmitResult(
+                success=False,
+                retryable=retryable,
+                http_status=http_status,
+                receiver_status=receiver_status,
+                body=sentinel,
+            )
+
+        report = run_source_binding_once(
+            registry=registry,
+            binding=binding,
+            config=SourceBindingRunConfig(event_url="http://127.0.0.1:8765/async-threads/v1/events"),
+            emit=leaking_emit,
+        )
+        outbox = registry.source_binding_outbox_status(binding_id=binding.binding_id)
+        last = outbox["last"]
+
+        assert report["ok"] is False
+        assert last["status"] == expected_status
+        assert last["lastError"] == f"emit_failed:http_{http_status}:{receiver_status}"
+        assert sentinel not in json.dumps(report, sort_keys=True)
+        assert sentinel not in json.dumps(outbox, sort_keys=True)
+
+
 def test_runner_disabled_listener_fails_closed_and_is_diagnosable(tmp_path):
     board_db = tmp_path / "kanban.db"
     _make_board_db(board_db, [("completed", {"summary": "done"}, 1700000001)])
