@@ -127,6 +127,7 @@ See [`docs/SECURITY.md`](docs/SECURITY.md) for more detail.
 - optional debounce/coalescing for routine same-thread updates;
 - generic workflow-stage/candidate/evidence tracking with serial/parallel gate policy;
 - terminal-event lifecycle policy for warning on stale enabled listeners or auto-retiring single-goal listeners after successful terminal delivery;
+- producer-agnostic source-binding registry and inspection tools for binding external sources such as Kanban boards to existing listeners without cron polling or listener retargeting;
 - Dynamic Workflows finalizer adapter helpers for registering `ath.listener.retire` cleanup handlers without coupling Dynamic Workflows core to ATH internals;
 - explicit agent-queue continuation policy metadata, with fail-closed mode when hard Hermes core bounds are required;
 - producer helper script for compact background-lane events;

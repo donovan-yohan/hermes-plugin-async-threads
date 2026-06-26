@@ -17,11 +17,15 @@ from async_threads.registry import AsyncThreadRegistry
 from async_threads.security import validate_timestamp
 from async_threads.tools import (
     ath_create_listener_tool,
+    ath_create_source_binding_tool,
     ath_generate_producer_handoff_tool,
     ath_get_listener_tool,
+    ath_get_source_binding_tool,
     ath_list_listeners_tool,
+    ath_list_source_bindings_tool,
     ath_retire_listener_tool,
     ath_rotate_listener_secret_tool,
+    ath_set_source_binding_status_tool,
     ath_trace_event_tool,
 )
 from gateway.config import Platform, PlatformConfig
@@ -171,6 +175,10 @@ def test_plugin_registers_model_facing_tools():
         "ath_rotate_listener_secret",
         "ath_generate_producer_handoff",
         "ath_trace_event",
+        "ath_create_source_binding",
+        "ath_list_source_bindings",
+        "ath_get_source_binding",
+        "ath_set_source_binding_status",
     }
     assert {entry["toolset"] for entry in ctx.tools.values()} == {"plugin_async_threads"}
     assert "ath" in ctx.commands
@@ -736,6 +744,76 @@ def test_list_inspect_and_retire_are_owner_scoped_and_hide_secret(tmp_path):
     assert rotated_retired["ok"] is False
     assert rotated_retired["error"] == "listener_disabled"
     assert not os.path.exists(secret_file)
+
+
+def test_source_binding_tools_create_list_inspect_and_retire_without_listener_side_effect(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    listener = registry.create_handle(
+        source=_source().to_dict(),
+        producer_id="ath-kanban-bridge",
+        allowed_event_types=["kanban.task.blocked", "kanban.task.completed"],
+        owner_user_id="user-1",
+        session_key="key-1",
+        session_id="sid-1",
+    )
+    registry.create_handle(source=_source(user_id="user-2").to_dict(), producer_id="ath-kanban-bridge", owner_user_id="user-2")
+
+    created = _loads(
+        ath_create_source_binding_tool(
+            {
+                "source": "kanban",
+                "board_ref": "default",
+                "listener_thread_key": listener.thread_key,
+                "event_filter": {"eventTypes": ["kanban.task.blocked", "kanban.task.completed"]},
+                "cursor": {"lastEventId": 10, "token": "abc123secret"},
+            },
+            **_tool_kwargs(registry, tmp_path),
+        )
+    )
+
+    assert created["ok"] is True
+    binding = created["binding"]
+    assert binding["source"] == "kanban"
+    assert binding["sourceRef"] == {"board": "default"}
+    assert binding["compatibility"]["valid"] is True
+    assert listener.secret not in json.dumps(created, sort_keys=True)
+    assert "abc123secret" not in json.dumps(created, sort_keys=True)
+
+    listed = _loads(ath_list_source_bindings_tool({"source": "kanban"}, **_tool_kwargs(registry, tmp_path)))
+    assert listed["count"] == 1
+    assert listed["bindings"][0]["bindingId"] == binding["bindingId"]
+
+    inspected = _loads(ath_get_source_binding_tool({"binding_id": binding["bindingId"]}, **_tool_kwargs(registry, tmp_path)))
+    assert "abc123secret" not in json.dumps(inspected, sort_keys=True)
+    assert "redacted" in json.dumps(inspected, sort_keys=True)
+    assert listener.secret not in json.dumps(inspected, sort_keys=True)
+    no_owner = _loads(ath_get_source_binding_tool({"binding_id": binding["bindingId"]}, **_tool_kwargs(registry, tmp_path, entry=_entry(_source(user_id="")))))
+    assert no_owner["ok"] is False
+    assert no_owner["error"] == "owner_unavailable"
+
+    paused = _loads(ath_set_source_binding_status_tool({"binding_id": binding["bindingId"], "status": "paused"}, **_tool_kwargs(registry, tmp_path)))
+    assert paused["binding"]["status"] == "paused"
+    assert paused["binding"]["compatibility"]["reason"] == "binding_paused"
+
+    retired = _loads(ath_set_source_binding_status_tool({"binding_id": binding["bindingId"], "status": "retired"}, **_tool_kwargs(registry, tmp_path)))
+    assert retired["ok"] is True
+    assert registry.get_handle(listener.thread_key).enabled is True
+    assert _loads(ath_list_source_bindings_tool({}, **_tool_kwargs(registry, tmp_path)))["count"] == 0
+
+
+def test_source_binding_tool_reports_disabled_listener_fail_closed(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    listener = registry.create_handle(source=_source().to_dict(), producer_id="ath-kanban-bridge", owner_user_id="user-1")
+    created = _loads(
+        ath_create_source_binding_tool({"source": "kanban", "board_ref": "default", "listener_thread_key": listener.thread_key}, **_tool_kwargs(registry, tmp_path))
+    )
+    registry.set_enabled(listener.thread_key, False)
+
+    inspected = _loads(ath_get_source_binding_tool({"binding_id": created["binding"]["bindingId"]}, **_tool_kwargs(registry, tmp_path)))
+
+    assert inspected["binding"]["compatibility"]["valid"] is False
+    assert inspected["binding"]["compatibility"]["failClosed"] is True
+    assert inspected["binding"]["compatibility"]["reason"] == "listener_disabled"
 
 
 @pytest.mark.asyncio

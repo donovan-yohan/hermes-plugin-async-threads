@@ -30,6 +30,12 @@ commands:
   /ath rotate-secret <thread_key>
   /ath lifecycle [thread_key]
   /ath prune [--dry-run|--force] [--event-log-days N] [--seen-days N]
+  /ath bind-source <source> <thread_key> [--board board] [--source-ref k=v,...] [--producer id] [--events a,b] [--policy agent_queue|direct]
+  /ath bindings [--source source] [--include-retired]
+  /ath inspect-binding <binding_id>
+  /ath pause-binding <binding_id>
+  /ath resume-binding <binding_id>
+  /ath retire-binding <binding_id>
   /ath pause <thread_key>
   /ath resume <thread_key>
   /ath retire <thread_key>
@@ -108,6 +114,18 @@ def _run_command(raw_args: str, *, event: Any, gateway: Any) -> str:
         return _cmd_lifecycle(registry, argv[1] if len(argv) >= 2 else "", owner_user_id=owner_user_id)
     if command == "prune":
         return _cmd_prune(registry, argv[1:], config=config, owner_user_id=owner_user_id)
+    if command in {"bind-source", "bind_source"}:
+        return _cmd_bind_source(registry, argv[1:], owner_user_id=owner_user_id)
+    if command in {"bindings", "source-bindings", "source_bindings"}:
+        return _cmd_bindings(registry, argv[1:], owner_user_id=owner_user_id)
+    if command in {"inspect-binding", "inspect_binding"} and len(argv) >= 2:
+        return _cmd_inspect_binding(registry, argv[1], owner_user_id=owner_user_id)
+    if command in {"pause-binding", "disable-binding"} and len(argv) >= 2:
+        return _cmd_set_binding_status(registry, argv[1], "paused", owner_user_id=owner_user_id)
+    if command in {"resume-binding", "enable-binding"} and len(argv) >= 2:
+        return _cmd_set_binding_status(registry, argv[1], "active", owner_user_id=owner_user_id)
+    if command in {"retire-binding", "revoke-binding", "remove-binding", "rm-binding"} and len(argv) >= 2:
+        return _cmd_set_binding_status(registry, argv[1], "retired", owner_user_id=owner_user_id)
     if command in {"pause", "disable"} and len(argv) >= 2:
         return _cmd_set_enabled(registry, argv[1], False, "paused", owner_user_id=owner_user_id, config=config)
     if command in {"resume", "enable"} and len(argv) >= 2:
@@ -498,6 +516,127 @@ def _cmd_prune(registry: Any, args: list[str], *, config: Any, owner_user_id: st
     )
 
 
+def _cmd_bind_source(registry: Any, args: list[str], *, owner_user_id: str) -> str:
+    if not owner_user_id:
+        return "no async-thread source bindings for this user."
+    if len(args) < 2:
+        return "usage: /ath bind-source <source> <thread_key> [--board board] [--source-ref k=v,...] [--producer id] [--events a,b] [--policy agent_queue|direct]"
+    source = args[0]
+    thread_key = args[1]
+    source_ref: dict[str, Any] = {}
+    event_filter: dict[str, Any] = {}
+    producer_id = ""
+    delivery_policy = "agent_queue"
+    i = 2
+    while i < len(args):
+        arg = args[i]
+        if arg == "--board" and i + 1 < len(args):
+            source_ref["board"] = args[i + 1]
+            i += 2
+            continue
+        if arg == "--source-ref" and i + 1 < len(args):
+            source_ref.update(_parse_kv_csv(args[i + 1]))
+            i += 2
+            continue
+        if arg == "--producer" and i + 1 < len(args):
+            producer_id = args[i + 1]
+            i += 2
+            continue
+        if arg == "--events" and i + 1 < len(args):
+            event_filter["eventTypes"] = _split_csv(args[i + 1])
+            i += 2
+            continue
+        if arg == "--policy" and i + 1 < len(args):
+            delivery_policy = args[i + 1]
+            i += 2
+            continue
+        return f"unknown option for /ath bind-source: {arg}"
+    if source == "kanban" and not source_ref.get("board"):
+        return "source=kanban requires --board or --source-ref board=<board>."
+    try:
+        binding = registry.create_source_binding(
+            owner_user_id=owner_user_id,
+            source=source,
+            source_ref=source_ref,
+            listener_thread_key=thread_key,
+            producer_id=producer_id,
+            event_filter=event_filter,
+            delivery_policy=delivery_policy,
+        )
+    except ValueError as exc:
+        return str(exc)
+    compatibility = registry.source_binding_compatibility(binding)
+    return (
+        "created async-thread source binding\n"
+        f"bindingId: `{binding.binding_id}`\n"
+        f"source: `{_display_metadata(binding.source, 80)}` ref={_format_binding_map(binding.source_ref)}\n"
+        f"listener: `{_display_metadata(binding.listener_thread_key, 80)}`\n"
+        f"producer: `{_display_metadata(binding.producer_id, 80)}`\n"
+        f"filter: {_format_binding_map(binding.event_filter)}\n"
+        f"status: `{binding.status}` compatibility=`{_display_text(compatibility.get('reason'), 80)}` failClosed=`{compatibility.get('failClosed')}`"
+    )
+
+
+def _cmd_bindings(registry: Any, args: list[str], *, owner_user_id: str) -> str:
+    if not owner_user_id:
+        return "no async-thread source bindings for this user."
+    source = ""
+    include_retired = False
+    i = 0
+    while i < len(args):
+        if args[i] == "--source" and i + 1 < len(args):
+            source = args[i + 1]
+            i += 2
+            continue
+        if args[i] == "--include-retired":
+            include_retired = True
+            i += 1
+            continue
+        return "usage: /ath bindings [--source source] [--include-retired]"
+    bindings = registry.list_source_bindings(owner_user_id=owner_user_id, source=source or None, include_retired=include_retired, limit=50)
+    if not bindings:
+        return "no async-thread source bindings for this user."
+    lines = ["async-thread source bindings:"]
+    for binding in bindings:
+        compatibility = registry.source_binding_compatibility(binding)
+        lines.append(
+            f"- `{_display_metadata(binding.binding_id, 80)}` {binding.status} source=`{_display_metadata(binding.source, 40)}` "
+            f"ref={_format_binding_map(binding.source_ref)} listener=`{_display_metadata(binding.listener_thread_key, 80)}` "
+            f"producer=`{_display_metadata(binding.producer_id, 80)}` compatibility=`{_display_text(compatibility.get('reason'), 80)}` failClosed=`{compatibility.get('failClosed')}`"
+        )
+    return "\n".join(lines)
+
+
+def _cmd_inspect_binding(registry: Any, binding_id: str, *, owner_user_id: str) -> str:
+    if not owner_user_id:
+        return "async-thread source binding not found."
+    binding = registry.get_source_binding(binding_id=binding_id, owner_user_id=owner_user_id)
+    if binding is None:
+        return "async-thread source binding not found."
+    compatibility = registry.source_binding_compatibility(binding)
+    return (
+        f"`{_display_metadata(binding.binding_id, 80)}` {binding.status}\n"
+        f"source: `{_display_metadata(binding.source, 80)}`\n"
+        f"sourceRef: {_format_binding_map(binding.source_ref)}\n"
+        f"listener: `{_display_metadata(binding.listener_thread_key, 80)}`\n"
+        f"producer: `{_display_metadata(binding.producer_id, 80)}`\n"
+        f"filter: {_format_binding_map(binding.event_filter)}\n"
+        f"transform: {_format_binding_map(binding.transform)}\n"
+        f"cursor: {_format_binding_map(binding.cursor)}\n"
+        f"coalesce: {_format_binding_map(binding.coalesce)}\n"
+        f"deliveryPolicy: `{_display_text(binding.delivery_policy, 40)}`\n"
+        f"compatibility: valid=`{compatibility.get('valid')}` failClosed=`{compatibility.get('failClosed')}` reason=`{_display_text(compatibility.get('reason'), 80)}`\n"
+        f"created: {binding.created_at}"
+    )
+
+
+def _cmd_set_binding_status(registry: Any, binding_id: str, status: str, *, owner_user_id: str) -> str:
+    if not registry.set_source_binding_status(binding_id=binding_id, owner_user_id=owner_user_id, status=status):
+        return "async-thread source binding not found."
+    verb = {"active": "resumed", "paused": "paused", "retired": "retired"}[status]
+    return f"{verb} async-thread source binding `{binding_id}`. listener lifecycle was not changed."
+
+
 def _configured_nonnegative_days(value: Any, default: int) -> int:
     parsed = _parse_nonnegative_days(value)
     return parsed if parsed is not None else default
@@ -519,12 +658,35 @@ def _split_csv(value: str) -> list[str]:
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
 
+def _parse_kv_csv(value: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for item in _split_csv(value):
+        key, sep, raw_value = item.partition("=")
+        if sep and key.strip():
+            parsed[key.strip()] = raw_value.strip()
+    return parsed
+
+
 def _display_text(value: Any, max_len: int) -> str:
     return _clip(redact_secret_text(str(value or ""), max_input_chars=1000, max_output_chars=1000), max_len)
 
 
 def _display_metadata(value: Any, max_len: int) -> str:
     return _clip(redact_metadata_text(str(value or ""), max_chars=1000), max_len)
+
+
+def _format_binding_map(value: Any) -> str:
+    if not isinstance(value, dict) or not value:
+        return "{}"
+    parts = []
+    for key, item in list(value.items())[:8]:
+        if isinstance(item, (dict, list, tuple)):
+            rendered = json.dumps(item, sort_keys=True, ensure_ascii=False)
+        else:
+            rendered = str(item)
+        parts.append(f"{_display_metadata(key, 40)}={_display_metadata(rendered, 80)}")
+    suffix = ",…" if len(value) > 8 else ""
+    return "{" + ",".join(parts) + suffix + "}"
 
 
 def _format_lifecycle_policy(policy: Any) -> str:

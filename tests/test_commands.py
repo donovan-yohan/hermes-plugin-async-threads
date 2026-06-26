@@ -5,10 +5,14 @@ import pytest
 from async_threads.commands import (
     _cmd_emit_command,
     _cmd_events,
+    _cmd_bind_source,
+    _cmd_bindings,
     _cmd_inspect,
+    _cmd_inspect_binding,
     _cmd_lifecycle,
     _cmd_list,
     _cmd_prune,
+    _cmd_set_binding_status,
     _cmd_set_enabled,
     _cmd_trace,
     _cmd_workflows,
@@ -311,6 +315,43 @@ def test_listener_management_commands_are_owner_scoped(tmp_path):
     mine_after_pause = registry.get_handle(mine.thread_key)
     assert mine_after_pause is not None
     assert mine_after_pause.enabled is False
+
+
+def test_source_binding_commands_are_owner_scoped_redacted_and_do_not_retire_listener(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    mine = registry.create_handle(
+        source={"platform": "discord", "chat_id": "c", "chat_type": "channel", "thread_id": "t"},
+        producer_id="ath-kanban-bridge",
+        allowed_event_types=["kanban.task.blocked", "kanban.task.completed"],
+        owner_user_id="u1",
+    )
+    other = registry.create_handle(
+        source={"platform": "discord", "chat_id": "c2", "chat_type": "channel", "thread_id": "t2"},
+        producer_id="ath-kanban-bridge",
+        owner_user_id="u2",
+    )
+
+    created = _cmd_bind_source(
+        registry,
+        ["kanban", mine.thread_key, "--board", "default", "--source-ref", "token=abc123secret", "--events", "kanban.task.blocked,kanban.task.completed"],
+        owner_user_id="u1",
+    )
+
+    assert "created async-thread source binding" in created
+    assert "abc123secret" not in created
+    [binding] = registry.list_source_bindings(owner_user_id="u1")
+    assert _cmd_bind_source(registry, ["kanban", other.thread_key, "--board", "default"], owner_user_id="u1") == "async-thread listener not found"
+    listing = _cmd_bindings(registry, [], owner_user_id="u1")
+    assert binding.binding_id in listing
+    assert other.thread_key not in listing
+    assert "failClosed=`False`" in listing
+    assert "abc123secret" not in _cmd_inspect_binding(registry, binding.binding_id, owner_user_id="u1")
+    assert _cmd_inspect_binding(registry, binding.binding_id, owner_user_id="") == "async-thread source binding not found."
+    assert _cmd_inspect_binding(registry, binding.binding_id, owner_user_id="u2") == "async-thread source binding not found."
+    assert _cmd_set_binding_status(registry, binding.binding_id, "paused", owner_user_id="u1") == f"paused async-thread source binding `{binding.binding_id}`. listener lifecycle was not changed."
+    assert _cmd_set_binding_status(registry, binding.binding_id, "retired", owner_user_id="u1") == f"retired async-thread source binding `{binding.binding_id}`. listener lifecycle was not changed."
+    assert registry.get_handle(mine.thread_key).enabled is True
+    assert _cmd_bindings(registry, [], owner_user_id="u1") == "no async-thread source bindings for this user."
 
 
 def test_status_events_and_inspect_show_owner_scoped_diagnostics(tmp_path):
