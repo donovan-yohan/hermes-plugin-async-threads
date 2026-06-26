@@ -1,6 +1,8 @@
 import json
 import sqlite3
 
+import pytest
+
 from async_threads.kanban import (
     dry_run_kanban_source_binding,
     kanban_read_failed_report,
@@ -92,9 +94,22 @@ def test_read_kanban_task_events_since_cursor_and_transform_material_events_safe
     serialized = json.dumps(envelope, sort_keys=True)
     assert "body" not in serialized
     assert "raw transcript" not in serialized
-    assert "ghp_abcdefghijklmnopqrstuvwxyz123456" not in serialized
+    assert "ghp_ab...3456" not in serialized
     assert "supersecret" not in serialized
     assert "<redacted>" in serialized or "redacted:" in serialized
+
+
+@pytest.mark.parametrize("filename", ["has?mark.db", "has#hash.db", "has%percent.db", "inject?mode=rwc.db"])
+def test_read_kanban_task_events_escapes_reserved_uri_characters_without_creating_sibling_files(tmp_path, filename):
+    board_db = tmp_path / filename
+    _make_board_db(board_db)
+
+    events = read_kanban_task_events(board_db, since_event_id=0, limit=2)
+
+    assert [event.id for event in events] == [1, 2]
+    assert events[0].task_id == "t_safe"
+    assert board_db.exists()
+    assert sorted(path.name for path in tmp_path.iterdir()) == [filename]
 
 
 def test_kanban_transform_suppresses_noise_and_maps_review_required_blockers(tmp_path):
@@ -148,7 +163,9 @@ def test_kanban_transform_suppresses_noise_and_maps_review_required_blockers(tmp
 
 
 def test_kanban_dry_run_reports_counts_cursor_and_malformed_payloads_without_advancing(tmp_path):
-    board_db = tmp_path / "kanban.db"
+    board_dir = tmp_path / "board"
+    board_dir.mkdir()
+    board_db = board_dir / "kanban?board#source.db"
     _make_board_db(board_db)
     registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
     listener = registry.create_handle(
@@ -173,6 +190,7 @@ def test_kanban_dry_run_reports_counts_cursor_and_malformed_payloads_without_adv
     assert report["dryRun"] is True
     assert report["cursor"] == {"fromEventId": 1, "wouldAdvanceToEventId": 6, "advanced": False}
     assert report["counts"] == {"would_emit": 3, "suppressed": 0, "would_coalesce": 2, "invalid_binding": 0}
+    assert sorted(path.name for path in board_dir.iterdir()) == ["kanban?board#source.db"]
     malformed = report["events"][-1]
     assert malformed["action"] == "would_emit"
     assert malformed["envelope"]["payload"]["payloadParseError"] is True
@@ -207,6 +225,13 @@ def test_kanban_read_failed_report_is_shared_and_redacted(tmp_path):
     assert dry_run_report["error"] == "kanban_read_failed"
     assert dry_run_report["events"] == report["events"]
     assert dry_run_report["counts"] == report["counts"]
+
+    malformed_db = tmp_path / "malformed.db"
+    malformed_db.write_text("not a sqlite database", encoding="utf-8")
+    malformed_report = dry_run_kanban_source_binding(registry=registry, binding=binding, board_db_path=malformed_db)
+    assert malformed_report["error"] == "kanban_read_failed"
+    assert malformed_report["events"] == report["events"]
+    assert malformed_report["counts"] == report["counts"]
 
 
 def test_kanban_dry_run_invalid_binding_fails_closed(tmp_path):

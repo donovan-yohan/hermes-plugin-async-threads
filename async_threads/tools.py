@@ -10,7 +10,7 @@ from typing import Any, Iterable, Mapping
 from .continuation import ContinuationPolicy
 from .adapter import registry_from_config
 from .handoffs import build_producer_handoff, handoff_root_from_config
-from .kanban import dry_run_kanban_source_binding, kanban_read_failed_report
+from .kanban import KANBAN_READ_FAILURE_EXCEPTIONS, dry_run_kanban_source_binding, kanban_read_failed_report
 from .listeners import ListenValidationError, create_listener
 from .origin import OriginResolution, resolve_current_origin
 from .privacy import redact_metadata_text, safe_event_id
@@ -586,7 +586,7 @@ def ath_dry_run_source_binding_tool(args: dict[str, Any], **kwargs: Any) -> str:
             since_event_id=args.get("since_event_id") if "since_event_id" in args else None,
             limit=_bounded_int(args.get("limit"), default=100, minimum=1, maximum=500),
         )
-    except (OSError, ValueError) as exc:
+    except KANBAN_READ_FAILURE_EXCEPTIONS as exc:
         report = kanban_read_failed_report(binding, exc)
     return _json(report)
 

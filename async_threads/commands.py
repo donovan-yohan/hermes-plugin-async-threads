@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 from .adapter import registry_from_config, registry_path_from_config
-from .kanban import dry_run_kanban_source_binding, kanban_read_failed_report
+from .kanban import KANBAN_READ_FAILURE_EXCEPTIONS, dry_run_kanban_source_binding, kanban_read_failed_report
 from .listeners import ListenValidationError, create_listener
 from .origin import remember_gateway_origin
 from .privacy import redact_metadata_text, redact_secret_text, safe_event_id
@@ -668,7 +668,7 @@ def _cmd_dry_run_binding(registry: Any, binding_id: str, args: list[str], *, own
             since_event_id=since_event_id,
             limit=limit,
         )
-    except (OSError, ValueError) as exc:
+    except KANBAN_READ_FAILURE_EXCEPTIONS as exc:
         report = kanban_read_failed_report(binding, exc)
     if as_json:
         return json.dumps(report, sort_keys=True, indent=2)

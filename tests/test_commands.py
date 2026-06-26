@@ -9,6 +9,7 @@ from async_threads.commands import (
     _cmd_emit_command,
     _cmd_events,
     _cmd_bind_source,
+    _cmd_dry_run_binding,
     _cmd_bindings,
     _cmd_inspect,
     _cmd_inspect_binding,
@@ -351,6 +352,13 @@ def test_source_binding_commands_are_owner_scoped_redacted_and_do_not_retire_lis
     assert "abc123secret" not in _cmd_inspect_binding(registry, binding.binding_id, owner_user_id="u1")
     assert _cmd_inspect_binding(registry, binding.binding_id, owner_user_id="") == "async-thread source binding not found."
     assert _cmd_inspect_binding(registry, binding.binding_id, owner_user_id="u2") == "async-thread source binding not found."
+
+    malformed_db = tmp_path / "malformed-kanban.db"
+    malformed_db.write_text("not a sqlite database", encoding="utf-8")
+    dry_run_error = json.loads(_cmd_dry_run_binding(registry, binding.binding_id, ["--db", str(malformed_db), "--json"], owner_user_id="u1"))
+    assert dry_run_error["error"] == "kanban_read_failed"
+    assert dry_run_error["events"] == [{"action": "invalid_binding", "reason": "kanban_read_failed"}]
+
     assert _cmd_set_binding_status(registry, binding.binding_id, "paused", owner_user_id="u1") == f"paused async-thread source binding `{binding.binding_id}`. listener lifecycle was not changed."
     assert _cmd_set_binding_status(registry, binding.binding_id, "retired", owner_user_id="u1") == f"retired async-thread source binding `{binding.binding_id}`. listener lifecycle was not changed."
     assert registry.get_handle(mine.thread_key).enabled is True

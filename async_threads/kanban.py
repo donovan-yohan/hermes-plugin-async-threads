@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.request import pathname2url
 
 from .emitter import build_event_envelope
 from .privacy import redact_metadata_text, redact_secret_text, sanitize_untrusted_value
@@ -26,6 +27,7 @@ KANBAN_PRODUCER_ID = "ath-kanban-bridge"
 DEFAULT_MATERIAL_KINDS = KANBAN_DEFAULT_MATERIAL_KINDS
 NOISY_KINDS = {"heartbeat", "claimed", "spawned", "promoted", "commented"}
 DIGEST_EVENT_TYPE = "kanban.task.comment_digest"
+KANBAN_READ_FAILURE_EXCEPTIONS = (OSError, ValueError, sqlite3.Error)
 
 
 @dataclass(frozen=True)
@@ -56,10 +58,10 @@ def read_kanban_task_events(
         raise FileNotFoundError(f"kanban board DB not found: {db_path}")
     since = _nonnegative_int(since_event_id, default=0)
     bounded_limit = max(1, min(_nonnegative_int(limit, default=100), 500))
-    uri = f"file:{db_path}?mode=ro"
+    uri = f"file:{pathname2url(str(db_path.resolve()))}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
-    conn.row_factory = sqlite3.Row
     try:
+        conn.row_factory = sqlite3.Row
         event_columns = _table_columns(conn, "task_events")
         required = {"id", "task_id", "kind", "created_at"}
         if not required.issubset(event_columns):
@@ -177,7 +179,7 @@ def dry_run_kanban_source_binding(
 
     try:
         events = read_kanban_task_events(db_path, since_event_id=cursor, limit=limit, task_id=task_id)
-    except (OSError, ValueError) as exc:
+    except KANBAN_READ_FAILURE_EXCEPTIONS as exc:
         return kanban_read_failed_report(binding, exc, compatibility=compatibility)
     results = [
         transform_kanban_task_event(
