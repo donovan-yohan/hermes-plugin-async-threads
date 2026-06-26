@@ -16,11 +16,39 @@ from typing import Any, Iterable, Mapping
 
 from .continuation import ContinuationPolicy
 from .lifecycle import LifecyclePolicy
-from .privacy import redact_metadata_text, redact_secret_text, safe_event_id
+from .privacy import redact_metadata_text, redact_secret_text, safe_event_id, sanitize_untrusted_value
 from .workflows import WorkflowPolicy, apply_workflow_transition, normalize_workflow_event
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
+
+SOURCE_BINDING_STATUSES = {"active", "paused", "retired"}
+SOURCE_BINDING_DELIVERY_POLICIES = {"agent_queue", "direct"}
+SOURCE_BINDINGS_DDL = """
+create table if not exists source_bindings(
+    binding_id text primary key,
+    created_at text not null,
+    updated_at text not null,
+    owner_user_id text not null,
+    source text not null,
+    source_ref_json text not null default '{}',
+    listener_thread_key text not null,
+    producer_id text not null,
+    filter_json text not null default '{}',
+    transform_json text not null default '{}',
+    cursor_json text not null default '{}',
+    coalesce_json text not null default '{}',
+    delivery_policy text not null default 'agent_queue',
+    status text not null default 'active'
+);
+
+create index if not exists idx_source_bindings_owner
+    on source_bindings(owner_user_id, status, created_at desc);
+create index if not exists idx_source_bindings_listener
+    on source_bindings(listener_thread_key);
+create index if not exists idx_source_bindings_source
+    on source_bindings(source, owner_user_id);
+"""
 
 SAFE_DETAIL_KEYS = {
     "ack_mode",
@@ -126,6 +154,24 @@ class AsyncThreadWorkflowState:
     last_event_id: str
     last_event_type: str
     last_summary: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class AsyncThreadSourceBinding:
+    binding_id: str
+    owner_user_id: str
+    source: str
+    source_ref: dict[str, Any]
+    listener_thread_key: str
+    producer_id: str
+    event_filter: dict[str, Any]
+    transform: dict[str, Any]
+    cursor: dict[str, Any]
+    coalesce: dict[str, Any]
+    delivery_policy: str
+    status: str
     created_at: str
     updated_at: str
 
@@ -240,7 +286,9 @@ class AsyncThreadRegistry:
 
                 create index if not exists idx_workflow_state_thread_updated
                     on workflow_state(thread_key, updated_at desc);
+
                 """
+                + SOURCE_BINDINGS_DDL
             )
             self._migrate_schema(conn)
             conn.execute(
@@ -269,6 +317,7 @@ class AsyncThreadRegistry:
             conn.execute("alter table async_thread_handles add column continuation_policy_json text not null default '{}'")
         if "lifecycle_policy_json" not in handle_columns:
             conn.execute("alter table async_thread_handles add column lifecycle_policy_json text not null default '{}'")
+        conn.executescript(SOURCE_BINDINGS_DDL)
 
     def create_handle(
         self,
@@ -692,6 +741,148 @@ class AsyncThreadRegistry:
         with self._connect() as conn:
             return int(conn.execute(sql, params).fetchone()[0])
 
+    def create_source_binding(
+        self,
+        *,
+        owner_user_id: str,
+        source: str,
+        source_ref: Mapping[str, Any],
+        listener_thread_key: str,
+        producer_id: str = "",
+        event_filter: Mapping[str, Any] | None = None,
+        transform: Mapping[str, Any] | None = None,
+        cursor: Mapping[str, Any] | None = None,
+        coalesce: Mapping[str, Any] | None = None,
+        delivery_policy: str = "agent_queue",
+        status: str = "active",
+    ) -> AsyncThreadSourceBinding:
+        owner_user_id = str(owner_user_id or "")
+        if not owner_user_id:
+            raise ValueError("owner_user_id is required")
+        handle = self.get_handle(listener_thread_key)
+        if handle is None or handle.owner_user_id != owner_user_id:
+            raise ValueError("async-thread listener not found")
+        source_token = _clean_token(source, default="source")
+        producer_token = _clean_token(producer_id or handle.producer_id or source_token, default=source_token)
+        delivery = delivery_policy if delivery_policy in SOURCE_BINDING_DELIVERY_POLICIES else "agent_queue"
+        normalized_status = status if status in SOURCE_BINDING_STATUSES else "active"
+        binding_id = f"athb_{secrets.token_urlsafe(12).replace('-', '').replace('_', '')[:16]}"
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into source_bindings(
+                    binding_id, created_at, updated_at, owner_user_id, source, source_ref_json,
+                    listener_thread_key, producer_id, filter_json, transform_json, cursor_json,
+                    coalesce_json, delivery_policy, status
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    binding_id,
+                    now,
+                    now,
+                    owner_user_id,
+                    source_token,
+                    _json_dump(_redacted_mapping(source_ref)),
+                    handle.thread_key,
+                    producer_token,
+                    _json_dump(_redacted_mapping(event_filter)),
+                    _json_dump(_redacted_mapping(transform)),
+                    _json_dump(_redacted_mapping(cursor)),
+                    _json_dump(_redacted_mapping(coalesce)),
+                    delivery,
+                    normalized_status,
+                ),
+            )
+        binding = self.get_source_binding(binding_id=binding_id, owner_user_id=owner_user_id)
+        if binding is None:  # pragma: no cover - inserted row should be visible
+            raise RuntimeError("source binding insert failed")
+        return binding
+
+    def get_source_binding(self, *, binding_id: str, owner_user_id: str | None = None) -> AsyncThreadSourceBinding | None:
+        sql = "select * from source_bindings where binding_id = ?"
+        params: list[Any] = [str(binding_id or "")]
+        if owner_user_id:
+            sql += " and owner_user_id = ?"
+            params.append(owner_user_id)
+        with self._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return _row_to_source_binding(row) if row else None
+
+    def list_source_bindings(
+        self,
+        *,
+        owner_user_id: str | None = None,
+        source: str | None = None,
+        include_retired: bool = False,
+        limit: int = 50,
+    ) -> list[AsyncThreadSourceBinding]:
+        limit = max(1, min(int(limit or 50), 100))
+        sql = "select * from source_bindings"
+        params: list[Any] = []
+        clauses: list[str] = []
+        if owner_user_id:
+            clauses.append("owner_user_id = ?")
+            params.append(owner_user_id)
+        if source:
+            clauses.append("source = ?")
+            params.append(_clean_token(source, default="source"))
+        if not include_retired:
+            clauses.append("status != 'retired'")
+        if clauses:
+            sql += " where " + " and ".join(clauses)
+        sql += " order by created_at desc, binding_id desc limit ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [_row_to_source_binding(row) for row in rows]
+
+    def set_source_binding_status(self, *, binding_id: str, owner_user_id: str, status: str) -> bool:
+        if status not in SOURCE_BINDING_STATUSES or not owner_user_id:
+            return False
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                update source_bindings
+                set status = ?, updated_at = ?
+                where binding_id = ? and owner_user_id = ?
+                """,
+                (status, utc_now(), binding_id, owner_user_id),
+            )
+            return cur.rowcount > 0
+
+    def source_binding_compatibility(self, binding: AsyncThreadSourceBinding) -> dict[str, Any]:
+        handle = self.get_handle(binding.listener_thread_key)
+        base = {
+            "listenerThreadKey": binding.listener_thread_key,
+            "bindingStatus": binding.status,
+            "valid": False,
+            "failClosed": True,
+            "reason": "unknown",
+        }
+        if binding.status != "active":
+            return {**base, "reason": f"binding_{binding.status}"}
+        if handle is None:
+            return {**base, "reason": "listener_missing"}
+        base.update(
+            {
+                "listenerEnabled": bool(handle.enabled),
+                "listenerProducerId": redact_metadata_text(handle.producer_id),
+                "listenerAllowedEventTypes": [redact_metadata_text(item) for item in handle.allowed_event_types],
+            }
+        )
+        if handle.owner_user_id != binding.owner_user_id:
+            return {**base, "reason": "listener_not_owned"}
+        if not handle.enabled:
+            return {**base, "reason": "listener_disabled"}
+        if binding.producer_id != handle.producer_id:
+            return {**base, "reason": "producer_mismatch"}
+        required_events = _source_binding_event_types(binding.event_filter)
+        missing = sorted(set(required_events).difference(handle.allowed_event_types)) if handle.allowed_event_types else []
+        if missing:
+            return {**base, "reason": "disallowed_event_types", "missingEventTypes": [redact_metadata_text(item) for item in missing]}
+        return {**base, "valid": True, "failClosed": False, "reason": "ok"}
+
     def latest_terminal_event(self, *, thread_key: str) -> AsyncThreadEventLog | None:
         return self.latest_terminal_events(thread_keys=[thread_key]).get(thread_key)
 
@@ -754,6 +945,25 @@ def _row_to_handle(row: sqlite3.Row) -> AsyncThreadHandle:
     )
 
 
+def _row_to_source_binding(row: sqlite3.Row) -> AsyncThreadSourceBinding:
+    return AsyncThreadSourceBinding(
+        binding_id=row["binding_id"],
+        owner_user_id=row["owner_user_id"],
+        source=row["source"],
+        source_ref=_parse_json_object(row["source_ref_json"]),
+        listener_thread_key=row["listener_thread_key"],
+        producer_id=row["producer_id"],
+        event_filter=_parse_json_object(row["filter_json"]),
+        transform=_parse_json_object(row["transform_json"]),
+        cursor=_parse_json_object(row["cursor_json"]),
+        coalesce=_parse_json_object(row["coalesce_json"]),
+        delivery_policy=row["delivery_policy"] or "agent_queue",
+        status=row["status"] or "active",
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
 def _row_to_event(row: sqlite3.Row) -> AsyncThreadEventLog:
     return AsyncThreadEventLog(
         id=int(row["id"]),
@@ -806,6 +1016,23 @@ def _row_to_workflow_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 def _json_dump(value: Any) -> str:
     return json.dumps(value if isinstance(value, (dict, list)) else {}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _redacted_mapping(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    cleaned = sanitize_untrusted_value(dict(value))
+    return cleaned if isinstance(cleaned, dict) else {}
+
+
+def _source_binding_event_types(event_filter: Mapping[str, Any]) -> tuple[str, ...]:
+    for key in ("eventTypes", "event_types", "allowedEventTypes", "allowed_event_types"):
+        raw = event_filter.get(key) if isinstance(event_filter, Mapping) else None
+        if isinstance(raw, str):
+            return tuple(item.strip() for item in raw.split(",") if item.strip())
+        if isinstance(raw, Iterable) and not isinstance(raw, (bytes, bytearray, str)):
+            return tuple(str(item).strip() for item in raw if str(item).strip())
+    return ()
 
 
 def _parse_json_object(value: str | None) -> dict[str, Any]:

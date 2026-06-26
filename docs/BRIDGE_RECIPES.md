@@ -195,6 +195,8 @@ Bridge checklist:
 5. Retry `502`/transport failures with the same `eventId`.
 6. Never include raw board comments, credentials, cookies, terminal transcripts, or prompt text as instructions.
 
+For native board integrations, persist this routing as a source binding instead of a cron poller. Bind `source=kanban` plus the board ref to an existing listener with `/ath bind-source kanban <thread_key> --board <board> --events kanban.task.blocked,kanban.task.completed,...`, or use the model-facing `ath_create_source_binding` tool. Listing/inspection redacts secret-shaped material and reports listener compatibility fail-closed; pausing or retiring a binding never retires the underlying listener.
+
 ## Repeated artifact revisions
 
 When several events describe one logical artifact, use a stable `seriesKey` plus a revision field:

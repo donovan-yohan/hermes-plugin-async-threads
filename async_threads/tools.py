@@ -125,6 +125,63 @@ _TRACE_SCHEMA = {
     },
 }
 
+_CREATE_SOURCE_BINDING_SCHEMA = {
+    "name": "ath_create_source_binding",
+    "description": "Create a producer-agnostic source binding from an upstream source (for example kanban) to an existing ATH listener. Does not create or retarget listeners.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "source": {"type": "string", "description": "Producer source type, e.g. kanban."},
+            "source_ref": {"type": "object", "description": "Source-specific reference such as {board: default}."},
+            "board_ref": {"type": "string", "description": "Convenience board ref for source=kanban."},
+            "listener_thread_key": {"type": "string", "description": "Existing ATH listener thread key to target."},
+            "producer_id": {"type": "string", "description": "Optional producer id. Defaults to the listener producer id."},
+            "event_filter": {"type": "object", "description": "Source event filter, e.g. {eventTypes: [...]}."},
+            "transform": {"type": "object", "description": "Trusted transform config name/options, not code."},
+            "cursor": {"type": "object", "description": "Producer cursor/checkpoint shape."},
+            "coalesce": {"type": "object", "description": "Coalescing/debounce policy."},
+            "delivery_policy": {"type": "string", "enum": ["agent_queue", "direct"], "description": "Delivery policy metadata for future runners."},
+        },
+        "required": ["source", "listener_thread_key"],
+    },
+}
+
+_LIST_SOURCE_BINDINGS_SCHEMA = {
+    "name": "ath_list_source_bindings",
+    "description": "List source bindings scoped to the current owner. Secret-shaped material is redacted.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "source": {"type": "string", "description": "Optional source filter, e.g. kanban."},
+            "include_retired": {"type": "boolean", "description": "Include retired bindings. Default false."},
+            "limit": {"type": "integer", "description": "Limit 1-100. Default 50."},
+        },
+    },
+}
+
+_GET_SOURCE_BINDING_SCHEMA = {
+    "name": "ath_get_source_binding",
+    "description": "Inspect one owner-scoped source binding and listener compatibility. Secrets are never returned.",
+    "parameters": {
+        "type": "object",
+        "properties": {"binding_id": {"type": "string", "description": "Source binding id."}},
+        "required": ["binding_id"],
+    },
+}
+
+_SOURCE_BINDING_STATUS_SCHEMA = {
+    "name": "ath_set_source_binding_status",
+    "description": "Pause, resume, or retire an owner-scoped source binding without changing the listener lifecycle.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "binding_id": {"type": "string", "description": "Source binding id."},
+            "status": {"type": "string", "enum": ["active", "paused", "retired"], "description": "New binding status."},
+        },
+        "required": ["binding_id", "status"],
+    },
+}
+
 
 def register_tools(ctx: Any) -> None:
     """Register model-facing ATH tools through PluginContext."""
@@ -183,6 +240,38 @@ def register_tools(ctx: Any) -> None:
         schema=_TRACE_SCHEMA,
         handler=ath_trace_event_tool,
         description=_TRACE_SCHEMA["description"],
+        emoji="🧵",
+    )
+    ctx.register_tool(
+        name="ath_create_source_binding",
+        toolset=TOOLSET,
+        schema=_CREATE_SOURCE_BINDING_SCHEMA,
+        handler=ath_create_source_binding_tool,
+        description=_CREATE_SOURCE_BINDING_SCHEMA["description"],
+        emoji="🧵",
+    )
+    ctx.register_tool(
+        name="ath_list_source_bindings",
+        toolset=TOOLSET,
+        schema=_LIST_SOURCE_BINDINGS_SCHEMA,
+        handler=ath_list_source_bindings_tool,
+        description=_LIST_SOURCE_BINDINGS_SCHEMA["description"],
+        emoji="🧵",
+    )
+    ctx.register_tool(
+        name="ath_get_source_binding",
+        toolset=TOOLSET,
+        schema=_GET_SOURCE_BINDING_SCHEMA,
+        handler=ath_get_source_binding_tool,
+        description=_GET_SOURCE_BINDING_SCHEMA["description"],
+        emoji="🧵",
+    )
+    ctx.register_tool(
+        name="ath_set_source_binding_status",
+        toolset=TOOLSET,
+        schema=_SOURCE_BINDING_STATUS_SCHEMA,
+        handler=ath_set_source_binding_status_tool,
+        description=_SOURCE_BINDING_STATUS_SCHEMA["description"],
         emoji="🧵",
     )
 
@@ -393,6 +482,68 @@ def ath_trace_event_tool(args: dict[str, Any], **kwargs: Any) -> str:
     return _json({"ok": True, "events": [_event_summary(event) for event in events], "count": len(events)})
 
 
+def ath_create_source_binding_tool(args: dict[str, Any], **kwargs: Any) -> str:
+    registry, _config = _registry_and_config(kwargs)
+    origin = _resolve_origin(kwargs)
+    if not origin.ok:
+        return _json(origin.public_error())
+    if not origin.owner_user_id:
+        return _json(_error("owner_unavailable", "current gateway user is unavailable"))
+    try:
+        spec = _source_binding_spec(args)
+        binding = registry.create_source_binding(owner_user_id=origin.owner_user_id, **spec)
+    except ValueError as exc:
+        return _json(_error("invalid_request", str(exc)))
+    return _json({"ok": True, "action": "created", "binding": _source_binding_summary(registry, binding)})
+
+
+def ath_list_source_bindings_tool(args: dict[str, Any], **kwargs: Any) -> str:
+    registry, _config = _registry_and_config(kwargs)
+    origin = _resolve_origin(kwargs)
+    if not origin.ok:
+        return _json(origin.public_error())
+    if not origin.owner_user_id:
+        return _json(_error("owner_unavailable", "current gateway user is unavailable"))
+    bindings = registry.list_source_bindings(
+        owner_user_id=origin.owner_user_id,
+        source=str(args.get("source") or "") or None,
+        include_retired=bool(args.get("include_retired", False)),
+        limit=_bounded_int(args.get("limit"), default=50, minimum=1, maximum=100),
+    )
+    return _json({"ok": True, "bindings": [_source_binding_summary(registry, binding) for binding in bindings], "count": len(bindings)})
+
+
+def ath_get_source_binding_tool(args: dict[str, Any], **kwargs: Any) -> str:
+    registry, _config = _registry_and_config(kwargs)
+    origin = _resolve_origin(kwargs)
+    if not origin.ok:
+        return _json(origin.public_error())
+    if not origin.owner_user_id:
+        return _json(_error("owner_unavailable", "current gateway user is unavailable"))
+    binding = registry.get_source_binding(binding_id=str(args.get("binding_id") or ""), owner_user_id=origin.owner_user_id)
+    if binding is None:
+        return _json(_error("not_found", "source binding not found"))
+    return _json({"ok": True, "binding": _source_binding_summary(registry, binding, include_config=True)})
+
+
+def ath_set_source_binding_status_tool(args: dict[str, Any], **kwargs: Any) -> str:
+    registry, _config = _registry_and_config(kwargs)
+    origin = _resolve_origin(kwargs)
+    if not origin.ok:
+        return _json(origin.public_error())
+    if not origin.owner_user_id:
+        return _json(_error("owner_unavailable", "current gateway user is unavailable"))
+    status = str(args.get("status") or "")
+    if status not in {"active", "paused", "retired"}:
+        return _json(_error("invalid_request", "status must be active, paused, or retired"))
+    binding_id = str(args.get("binding_id") or "")
+    changed = registry.set_source_binding_status(binding_id=binding_id, owner_user_id=origin.owner_user_id, status=status)
+    if not changed:
+        return _json(_error("not_found", "source binding not found"))
+    binding = registry.get_source_binding(binding_id=binding_id, owner_user_id=origin.owner_user_id)
+    return _json({"ok": True, "action": status, "binding": _source_binding_summary(registry, binding) if binding else {"bindingId": binding_id, "status": status}})
+
+
 def _registry_and_config(kwargs: Mapping[str, Any]) -> tuple[AsyncThreadRegistry, Any]:
     registry = kwargs.get("registry")
     config = kwargs.get("config") or _platform_config_from_loaded_config()
@@ -484,6 +635,78 @@ def _listener_spec(args: Mapping[str, Any]) -> dict[str, Any]:
         "continuation_policy": continuation_policy,
         "lifecycle_policy": lifecycle_policy,
     }
+
+
+def _source_binding_spec(args: Mapping[str, Any]) -> dict[str, Any]:
+    source = _clean_token(str(args.get("source") or ""), default="")
+    if not source:
+        raise ValueError("source is required")
+    listener_thread_key = str(args.get("listener_thread_key") or args.get("thread_key") or "").strip()
+    if not listener_thread_key:
+        raise ValueError("listener_thread_key is required")
+    source_ref = _mapping_arg(args.get("source_ref"))
+    board_ref = str(args.get("board_ref") or args.get("board") or "").strip()
+    if board_ref and "board" not in source_ref:
+        source_ref["board"] = board_ref
+    if source == "kanban" and not source_ref.get("board"):
+        raise ValueError("source=kanban requires source_ref.board or board_ref")
+    delivery_policy = str(args.get("delivery_policy") or args.get("delivery") or "agent_queue")
+    if delivery_policy not in {"agent_queue", "direct"}:
+        delivery_policy = "agent_queue"
+    return {
+        "source": source,
+        "source_ref": source_ref,
+        "listener_thread_key": listener_thread_key,
+        "producer_id": str(args.get("producer_id") or ""),
+        "event_filter": _mapping_arg(args.get("event_filter")),
+        "transform": _mapping_arg(args.get("transform")),
+        "cursor": _mapping_arg(args.get("cursor")),
+        "coalesce": _mapping_arg(args.get("coalesce")),
+        "delivery_policy": delivery_policy,
+    }
+
+
+def _source_binding_summary(registry: AsyncThreadRegistry, binding: Any, *, include_config: bool = False) -> dict[str, Any]:
+    payload = {
+        "bindingId": binding.binding_id,
+        "source": redact_metadata_text(binding.source),
+        "sourceRef": _public_value(binding.source_ref),
+        "listenerThreadKey": binding.listener_thread_key,
+        "producerId": redact_metadata_text(binding.producer_id),
+        "eventFilter": _public_value(binding.event_filter),
+        "deliveryPolicy": binding.delivery_policy,
+        "status": binding.status,
+        "createdAt": binding.created_at,
+        "updatedAt": binding.updated_at,
+        "compatibility": registry.source_binding_compatibility(binding),
+    }
+    if include_config:
+        payload.update(
+            {
+                "transform": _public_value(binding.transform),
+                "cursor": _public_value(binding.cursor),
+                "coalesce": _public_value(binding.coalesce),
+            }
+        )
+    return payload
+
+
+def _mapping_arg(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _public_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {redact_metadata_text(str(key)): _public_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_public_value(item) for item in value[:100]]
+    if isinstance(value, tuple):
+        return [_public_value(item) for item in value[:100]]
+    if isinstance(value, str):
+        return redact_metadata_text(value, max_chars=1000)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return redact_metadata_text(str(value), max_chars=1000)
 
 
 def _find_equivalent_listener(

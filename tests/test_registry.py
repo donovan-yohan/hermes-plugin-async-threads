@@ -108,6 +108,66 @@ def test_registry_creates_lists_revokes_and_dedupes(tmp_path: Path):
     assert reg.get_handle(handle.thread_key).enabled is False
 
 
+def test_source_binding_registry_owner_scope_lifecycle_and_compatibility(tmp_path: Path):
+    reg = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    mine = reg.create_handle(
+        source={"platform": "discord", "chat_id": "c", "thread_id": "t", "chat_type": "channel"},
+        producer_id="ath-kanban-bridge",
+        allowed_event_types=["kanban.task.blocked", "kanban.task.completed"],
+        owner_user_id="u1",
+    )
+    other = reg.create_handle(
+        source={"platform": "discord", "chat_id": "c2", "thread_id": "t2", "chat_type": "channel"},
+        producer_id="ath-kanban-bridge",
+        owner_user_id="u2",
+    )
+
+    binding = reg.create_source_binding(
+        owner_user_id="u1",
+        source="kanban",
+        source_ref={"board": "default", "api_token": "secret=do-not-store"},
+        listener_thread_key=mine.thread_key,
+        event_filter={"eventTypes": ["kanban.task.blocked", "kanban.task.completed"]},
+        cursor={"last_event_id": 42, "token": "abc123secret"},
+        coalesce={"windowSeconds": 20},
+    )
+
+    assert binding.binding_id.startswith("athb_")
+    assert binding.source == "kanban"
+    assert binding.source_ref["api_token"] == "secret=<redacted>"
+    assert "abc123secret" not in json.dumps(binding.cursor, sort_keys=True)
+    assert reg.source_binding_compatibility(binding) == {
+        "bindingStatus": "active",
+        "failClosed": False,
+        "listenerAllowedEventTypes": ["kanban.task.blocked", "kanban.task.completed"],
+        "listenerEnabled": True,
+        "listenerProducerId": "ath-kanban-bridge",
+        "listenerThreadKey": mine.thread_key,
+        "reason": "ok",
+        "valid": True,
+    }
+    assert [item.binding_id for item in reg.list_source_bindings(owner_user_id="u1")] == [binding.binding_id]
+    assert reg.get_source_binding(binding_id=binding.binding_id, owner_user_id="u2") is None
+    with pytest.raises(ValueError, match="not found"):
+        reg.create_source_binding(owner_user_id="u1", source="kanban", source_ref={"board": "default"}, listener_thread_key=other.thread_key)
+
+    assert reg.set_source_binding_status(binding_id=binding.binding_id, owner_user_id="u2", status="paused") is False
+    assert reg.set_source_binding_status(binding_id=binding.binding_id, owner_user_id="u1", status="paused") is True
+    paused = reg.get_source_binding(binding_id=binding.binding_id, owner_user_id="u1")
+    assert paused is not None
+    assert paused.status == "paused"
+    assert reg.source_binding_compatibility(paused)["reason"] == "binding_paused"
+    assert reg.set_source_binding_status(binding_id=binding.binding_id, owner_user_id="u1", status="active") is True
+    reg.set_enabled(mine.thread_key, False)
+    disabled = reg.get_source_binding(binding_id=binding.binding_id, owner_user_id="u1")
+    assert disabled is not None
+    assert reg.source_binding_compatibility(disabled)["reason"] == "listener_disabled"
+    assert reg.set_source_binding_status(binding_id=binding.binding_id, owner_user_id="u1", status="retired") is True
+    assert reg.get_handle(mine.thread_key).enabled is False
+    assert reg.list_source_bindings(owner_user_id="u1") == []
+    assert reg.list_source_bindings(owner_user_id="u1", include_retired=True)[0].status == "retired"
+
+
 def test_normalize_workflow_event_ignores_non_mapping_payloads():
     assert normalize_workflow_event([], {"event_id": "evt", "event_type": "job.progress", "summary": "ignored"}) is None
     assert normalize_workflow_event("not-json-object", {"event_id": "evt", "event_type": "job.progress"}) is None
@@ -464,6 +524,7 @@ def test_v1_registry_migrates_detail_json_without_data_loss(tmp_path: Path):
     with reg._connect() as migrated:
         columns = {row["name"] for row in migrated.execute("pragma table_info(event_log)").fetchall()}
         handle_columns = {row["name"] for row in migrated.execute("pragma table_info(async_thread_handles)").fetchall()}
+        source_binding_columns = {row["name"] for row in migrated.execute("pragma table_info(source_bindings)").fetchall()}
         schema_version = migrated.execute("select value from meta where key = 'schema_version'").fetchone()[0]
         detail_json = migrated.execute("select detail_json from event_log where event_id = 'evt_old'").fetchone()[0]
         ack_mode = migrated.execute("select ack_mode from async_thread_handles where thread_key = 'ath_v1'").fetchone()[0]
@@ -471,6 +532,7 @@ def test_v1_registry_migrates_detail_json_without_data_loss(tmp_path: Path):
     assert "ack_mode" in handle_columns
     assert "workflow_policy_json" in handle_columns
     assert "continuation_policy_json" in handle_columns
+    assert {"binding_id", "listener_thread_key", "cursor_json", "status"}.issubset(source_binding_columns)
     assert schema_version == str(SCHEMA_VERSION)
     assert detail_json == "{}"
     assert ack_mode == "none"

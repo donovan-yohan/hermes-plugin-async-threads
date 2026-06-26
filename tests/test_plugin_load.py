@@ -89,5 +89,9 @@ def test_root_plugin_registers_platform_hook_and_command():
         "ath_rotate_listener_secret",
         "ath_generate_producer_handoff",
         "ath_trace_event",
+        "ath_create_source_binding",
+        "ath_list_source_bindings",
+        "ath_get_source_binding",
+        "ath_set_source_binding_status",
     }
     assert {tool["toolset"] for tool in ctx.tools} == {"plugin_async_threads"}
