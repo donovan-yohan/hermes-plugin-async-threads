@@ -189,7 +189,7 @@ def _build_adapter_base():
             self._source_binding_runner_limit = max(1, min(int((config.extra or {}).get("source_binding_runner_limit", 100)), 500))
             self._source_binding_runner_task: asyncio.Task | None = None
 
-        async def connect(self) -> bool:
+        async def connect(self, *args: Any, **kwargs: Any) -> bool:
             from aiohttp import web
 
             app = web.Application(client_max_size=self._max_body_bytes)
