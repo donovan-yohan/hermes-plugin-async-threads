@@ -182,6 +182,48 @@ def test_runner_emit_failures_do_not_persist_receiver_body_in_diagnostics(tmp_pa
         assert sentinel not in json.dumps(outbox, sort_keys=True)
 
 
+def test_runner_nonretryable_emit_failure_is_terminal_and_not_resent(tmp_path):
+    board_db = tmp_path / "kanban.db"
+    _make_board_db(board_db, [("completed", {"summary": "done"}, 1700000001)])
+    registry, _listener, binding = _binding(tmp_path, db_path=board_db)
+    event_ids = []
+
+    def nonretryable_emit(url, event, **kwargs):
+        event_ids.append(event["eventId"])
+        return EmitResult(success=False, retryable=False, http_status=400, receiver_status="bad_request", body="bad payload")
+
+    first = run_source_binding_once(
+        registry=registry,
+        binding=binding,
+        config=SourceBindingRunConfig(event_url="http://127.0.0.1:8765/async-threads/v1/events"),
+        emit=nonretryable_emit,
+    )
+    second = run_source_binding_once(
+        registry=registry,
+        binding=binding,
+        config=SourceBindingRunConfig(event_url="http://127.0.0.1:8765/async-threads/v1/events"),
+        emit=nonretryable_emit,
+    )
+
+    assert first["ok"] is False
+    assert event_ids == ["ath:t_runner:1"]
+    assert second["processed"] == [
+        {
+            "upstreamEventId": 1,
+            "eventId": "ath:t_runner:1",
+            "eventType": "kanban.task.completed",
+            "action": "would_emit",
+            "status": "error",
+        }
+    ]
+    refreshed = registry.get_source_binding(binding_id=binding.binding_id, owner_user_id="u1")
+    assert refreshed.cursor["last_event_id"] == 1
+    status = registry.source_binding_outbox_status(binding_id=binding.binding_id)["last"]
+    assert status["status"] == "error"
+    assert status["attempts"] == 1
+    assert status["lastError"] == "emit_failed:http_400:bad_request"
+
+
 def test_runner_disabled_listener_fails_closed_and_is_diagnosable(tmp_path):
     board_db = tmp_path / "kanban.db"
     _make_board_db(board_db, [("completed", {"summary": "done"}, 1700000001)])

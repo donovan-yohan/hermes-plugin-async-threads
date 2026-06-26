@@ -26,7 +26,8 @@ from .registry import AsyncThreadRegistry, AsyncThreadSourceBinding
 
 EmitCallable = Callable[..., EmitResult | Mapping[str, Any]]
 
-TERMINAL_SAFE_OUTBOX_STATUSES = {"succeeded", "duplicate", "suppressed", "coalesced"}
+# "error" is terminal for non-retryable failures; retryable transport rows stay pending.
+TERMINAL_SAFE_OUTBOX_STATUSES = {"succeeded", "duplicate", "suppressed", "coalesced", "error"}
 
 
 @dataclass(frozen=True)
@@ -178,6 +179,8 @@ def run_source_binding_once(
             receiver_status=str(result_dict.get("status") or ""),
             increment_attempts=True,
         )
+        if not retryable:
+            registry.advance_source_binding_cursor(binding_id=binding.binding_id, upstream_event_id=event.id)
         counts["retryable_error" if retryable else "error"] += 1
         processed.append(_processed_item(event.id, action, "retryable_error" if retryable else "error"))
         stopped = True
