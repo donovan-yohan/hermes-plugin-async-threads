@@ -81,6 +81,47 @@ Use these when a producer wants Hermes to track a long-running workflow or gate 
 
 Workflow fields are sanitized before persistence. They are still producer-controlled data, not agent instructions.
 
+## Source-binding derived events
+
+Source bindings are trusted local configuration that turn an upstream event stream into this same public event envelope. They do not let upstream payloads define instructions, transforms, secrets, or delivery targets.
+
+For Kanban source bindings, the default event shape is:
+
+```json
+{
+  "version": "async-thread-event/v1",
+  "eventId": "ath:t_4361a7a9:12345",
+  "eventType": "kanban.task.blocked",
+  "producer": {"id": "ath-kanban-bridge"},
+  "occurredAt": "2026-06-20T19:00:00Z",
+  "asyncThread": {"threadKey": "ath_mg3BQeDs15Gm4DnF"},
+  "summary": "Kanban task t_4361a7a9 blocked",
+  "tailMode": "compact",
+  "seriesKey": "kanban:ath:t_4361a7a9",
+  "workflowId": "kanban:ath:t_4361a7a9",
+  "stage": "blocked",
+  "subject": {
+    "board": "ath",
+    "task": "t_4361a7a9",
+    "title": "Document ATH source bindings and Kanban dogfood UX",
+    "assignee": "kani-backend",
+    "status": "blocked"
+  },
+  "payload": {
+    "status": "blocked",
+    "kanbanEventKind": "blocked",
+    "taskEventId": 12345,
+    "taskId": "t_4361a7a9",
+    "runId": 36,
+    "eventDetail": "review-required: source-binding docs need approval"
+  }
+}
+```
+
+Default Kanban material events are `kanban.task.blocked`, `kanban.task.completed`, `kanban.task.crashed`, `kanban.task.gave_up`, `kanban.task.timed_out`, and `kanban.task.ready_for_review`. The idempotency key is `<board>:<task_id>:<task_event_id>` and the series/workflow key is `kanban:<board>:<task_id>`. Routine comments, heartbeats, claims, spawns, and promotions are suppressed unless an explicit digest/coalescing policy is configured.
+
+Source-binding events must keep raw task comments, task bodies, full logs, terminal transcripts, credentials, cookies, authorization headers, HMAC secrets, and prompt-like instructions out of the envelope. Put compact status facts and evidence handles in `subject`/`payload`, then use `/ath inspect-binding`, `ath_get_source_binding`, `/ath trace`, or `ath_trace_event` for diagnostics.
+
 ## Repeated artifact and supersession convention
 
 Use a stable `seriesKey` when multiple event ids describe revisions of the same logical artifact. Put the current revision on the artifact itself, usually as `artifact.revision` or `subject.artifact.revision`.

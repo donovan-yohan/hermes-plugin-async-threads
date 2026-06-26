@@ -16,6 +16,7 @@ from .origin import OriginResolution, resolve_current_origin
 from .privacy import redact_metadata_text, safe_event_id
 from .registry import AsyncThreadHandle, AsyncThreadRegistry, sanitize_event_detail
 from .secrets import describe_secret_artifact, remove_secret_artifact, secret_root_from_config
+from .source_runner import source_binding_runner_status
 
 TOOLSET = "plugin_async_threads"
 
@@ -733,6 +734,7 @@ def _source_binding_summary(registry: AsyncThreadRegistry, binding: Any, *, incl
                 "transform": _public_value(binding.transform),
                 "cursor": _public_value(binding.cursor),
                 "coalesce": _public_value(binding.coalesce),
+                "runnerStatus": _public_value(source_binding_runner_status(registry=registry, binding=binding)),
             }
         )
     return payload

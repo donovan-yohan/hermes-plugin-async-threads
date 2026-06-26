@@ -68,6 +68,60 @@ def test_bridge_recipes_include_complete_natural_language_to_event_workflow():
     assert "Manual `/ath` admin/debug path" in text
 
 
+def test_docs_cover_kanban_source_binding_dogfood_without_cron_or_raw_payloads():
+    readme = _read("README.md")
+    problem = _read("docs/PROBLEM_STATEMENT.md")
+    recipes = _read("docs/BRIDGE_RECIPES.md")
+    contract = _read("docs/EVENT_CONTRACT.md")
+
+    for text in (readme, problem, recipes, contract):
+        assert "ath_mg3BQeDs15Gm4DnF" in text
+        assert "ath-kanban-bridge" in text
+        assert "kanban.task.blocked" in text
+        assert "kanban.task.completed" in text
+        assert "kanban.task.crashed" in text
+        assert "kanban.task.gave_up" in text
+        assert "kanban.task.timed_out" in text
+        assert "kanban.task.ready_for_review" in text
+
+    assert "/ath bind-source kanban ath_mg3BQeDs15Gm4DnF --board ath" in recipes
+    assert "ath_create_source_binding" in readme
+    assert "ath_dry_run_source_binding" in readme
+    assert "would_emit" in recipes
+    assert "suppressed" in recipes
+    assert "would_coalesce" in recipes
+    assert "invalid_binding" in recipes
+    assert "source_binding_runner_enabled" in recipes
+    assert "not a Hermes cron job" in recipes
+    assert "emergency fallback" in problem
+    assert "raw task comments" in contract
+    assert "prompt-like instructions" in contract
+
+
+def test_source_binding_docs_do_not_model_raw_comments_logs_or_secrets_as_instructions():
+    checked = {
+        "README.md": _read("README.md"),
+        "docs/PROBLEM_STATEMENT.md": _read("docs/PROBLEM_STATEMENT.md"),
+        "docs/BRIDGE_RECIPES.md": _read("docs/BRIDGE_RECIPES.md"),
+        "docs/EVENT_CONTRACT.md": _read("docs/EVENT_CONTRACT.md"),
+    }
+
+    forbidden = [
+        "ignore previous instructions",
+        '"rawComments"',
+        '"rawLogs"',
+        '"secret"',
+        '"secretFile"',
+        "-----BEGIN",
+    ]
+    offenders = []
+    for path, text in checked.items():
+        for needle in forbidden:
+            if needle in text:
+                offenders.append(f"{path}: {needle}")
+    assert offenders == []
+
+
 def test_public_docs_do_not_overclaim_hard_bounded_continuations():
     checked = {
         "README.md": _read("README.md"),

@@ -15,6 +15,7 @@ from .privacy import redact_metadata_text, redact_secret_text, safe_event_id
 from .registry import safe_session_key_hash
 from .routing import send_metadata_for_source
 from .secrets import describe_secret_artifact, remove_secret_artifact, secret_root_from_config
+from .source_runner import source_binding_runner_status
 from .workflows import WorkflowPolicy
 
 
@@ -733,6 +734,7 @@ def _cmd_inspect_binding(registry: Any, binding_id: str, *, owner_user_id: str) 
     if binding is None:
         return "async-thread source binding not found."
     compatibility = registry.source_binding_compatibility(binding)
+    runner_status = source_binding_runner_status(registry=registry, binding=binding)
     return (
         f"`{_display_metadata(binding.binding_id, 80)}` {binding.status}\n"
         f"source: `{_display_metadata(binding.source, 80)}`\n"
@@ -745,6 +747,7 @@ def _cmd_inspect_binding(registry: Any, binding_id: str, *, owner_user_id: str) 
         f"coalesce: {_format_binding_map(binding.coalesce)}\n"
         f"deliveryPolicy: `{_display_text(binding.delivery_policy, 40)}`\n"
         f"compatibility: valid=`{compatibility.get('valid')}` failClosed=`{compatibility.get('failClosed')}` reason=`{_display_text(compatibility.get('reason'), 80)}`\n"
+        f"runner: health=`{_display_text(runner_status.get('health'), 40)}` cursor=`{_display_text(runner_status.get('cursor', {}).get('lastEventId'), 20)}` lag=`{_display_text(runner_status.get('lag'), 20)}` outbox={_format_binding_map(runner_status.get('outbox', {}).get('counts', {}))}\n"
         f"created: {binding.created_at}"
     )
 

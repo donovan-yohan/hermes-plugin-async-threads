@@ -21,7 +21,7 @@ from .source_filters import KANBAN_DEFAULT_EVENT_TYPES, source_binding_event_typ
 from .workflows import WorkflowPolicy, apply_workflow_transition, normalize_workflow_event
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SOURCE_BINDING_STATUSES = {"active", "paused", "retired"}
 SOURCE_BINDING_DELIVERY_POLICIES = {"agent_queue", "direct"}
@@ -49,6 +49,31 @@ create index if not exists idx_source_bindings_listener
     on source_bindings(listener_thread_key);
 create index if not exists idx_source_bindings_source
     on source_bindings(source, owner_user_id);
+"""
+SOURCE_BINDING_OUTBOX_DDL = """
+create table if not exists source_binding_outbox(
+    id integer primary key autoincrement,
+    binding_id text not null,
+    upstream_event_id integer not null,
+    ath_event_id text not null,
+    event_type text not null default '',
+    action text not null,
+    status text not null default 'pending',
+    attempts integer not null default 0,
+    http_status integer,
+    receiver_status text not null default '',
+    last_error text not null default '',
+    envelope_json text not null default '{}',
+    created_at text not null,
+    updated_at text not null,
+    unique(binding_id, upstream_event_id),
+    foreign key (binding_id) references source_bindings(binding_id) on delete cascade
+);
+
+create index if not exists idx_source_binding_outbox_binding_status
+    on source_binding_outbox(binding_id, status, upstream_event_id);
+create index if not exists idx_source_binding_outbox_ath_event
+    on source_binding_outbox(ath_event_id);
 """
 
 SAFE_DETAIL_KEYS = {
@@ -290,6 +315,7 @@ class AsyncThreadRegistry:
 
                 """
                 + SOURCE_BINDINGS_DDL
+                + SOURCE_BINDING_OUTBOX_DDL
             )
             self._migrate_schema(conn)
             conn.execute(
@@ -318,7 +344,7 @@ class AsyncThreadRegistry:
             conn.execute("alter table async_thread_handles add column continuation_policy_json text not null default '{}'")
         if "lifecycle_policy_json" not in handle_columns:
             conn.execute("alter table async_thread_handles add column lifecycle_policy_json text not null default '{}'")
-        conn.executescript(SOURCE_BINDINGS_DDL)
+        conn.executescript(SOURCE_BINDINGS_DDL + SOURCE_BINDING_OUTBOX_DDL)
 
     def create_handle(
         self,
@@ -852,6 +878,134 @@ class AsyncThreadRegistry:
             )
             return cur.rowcount > 0
 
+    def advance_source_binding_cursor(self, *, binding_id: str, upstream_event_id: int) -> bool:
+        """Advance a binding cursor monotonically after terminal-safe outbox rows."""
+
+        event_id = max(0, int(upstream_event_id or 0))
+        with self._connect() as conn:
+            row = conn.execute("select cursor_json from source_bindings where binding_id = ?", (binding_id,)).fetchone()
+            if row is None:
+                return False
+            cursor = _parse_json_object(row["cursor_json"])
+            current = 0
+            for key in ("last_event_id", "lastEventId", "taskEventId", "task_event_id"):
+                try:
+                    current = max(current, int(cursor.get(key, 0)))
+                except (TypeError, ValueError):
+                    continue
+            if event_id <= current:
+                return True
+            cursor["last_event_id"] = event_id
+            cursor["lastEventId"] = event_id
+            conn.execute(
+                "update source_bindings set cursor_json = ?, updated_at = ? where binding_id = ?",
+                (_json_dump(cursor), utc_now(), binding_id),
+            )
+        return True
+
+    def upsert_source_binding_outbox(
+        self,
+        *,
+        binding_id: str,
+        upstream_event_id: int,
+        ath_event_id: str,
+        event_type: str,
+        action: str,
+        envelope: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Persist a pending outbox row before emitting an ATH event."""
+
+        row_id = max(0, int(upstream_event_id or 0))
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into source_binding_outbox(
+                    binding_id, upstream_event_id, ath_event_id, event_type, action,
+                    status, envelope_json, created_at, updated_at
+                ) values (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                on conflict(binding_id, upstream_event_id) do nothing
+                """,
+                (
+                    binding_id,
+                    row_id,
+                    safe_event_id(ath_event_id),
+                    redact_metadata_text(event_type or ""),
+                    redact_metadata_text(action or ""),
+                    _json_dump(_redacted_mapping(envelope)),
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "select * from source_binding_outbox where binding_id = ? and upstream_event_id = ?",
+                (binding_id, row_id),
+            ).fetchone()
+        return _row_to_source_binding_outbox(row) if row else {}
+
+    def mark_source_binding_outbox(
+        self,
+        *,
+        binding_id: str,
+        upstream_event_id: int,
+        status: str,
+        error: str = "",
+        http_status: Any = None,
+        receiver_status: str = "",
+        increment_attempts: bool = False,
+    ) -> bool:
+        """Update one outbox row after emit/suppress/coalesce handling."""
+
+        safe_status = _clean_token(status, default="pending")
+        try:
+            http_value = None if http_status in (None, "") else int(http_status)
+        except (TypeError, ValueError):
+            http_value = None
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                update source_binding_outbox
+                set status = ?,
+                    attempts = attempts + ?,
+                    http_status = ?,
+                    receiver_status = ?,
+                    last_error = ?,
+                    updated_at = ?
+                where binding_id = ? and upstream_event_id = ?
+                """,
+                (
+                    safe_status,
+                    1 if increment_attempts else 0,
+                    http_value,
+                    redact_metadata_text(receiver_status or ""),
+                    redact_secret_text(error or "", max_input_chars=1000, max_output_chars=500),
+                    utc_now(),
+                    binding_id,
+                    max(0, int(upstream_event_id or 0)),
+                ),
+            )
+            return cur.rowcount > 0
+
+    def source_binding_outbox_status(self, *, binding_id: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "select status, count(*) as count from source_binding_outbox where binding_id = ? group by status",
+                (binding_id,),
+            ).fetchall()
+            last = conn.execute(
+                """
+                select * from source_binding_outbox
+                where binding_id = ?
+                order by upstream_event_id desc, id desc
+                limit 1
+                """,
+                (binding_id,),
+            ).fetchone()
+        payload: dict[str, Any] = {"counts": {row["status"]: int(row["count"]) for row in rows}}
+        if last is not None:
+            payload["last"] = _row_to_source_binding_outbox(last, include_envelope=False)
+        return payload
+
     def source_binding_compatibility(self, binding: AsyncThreadSourceBinding) -> dict[str, Any]:
         handle = self.get_handle(binding.listener_thread_key)
         base = {
@@ -967,6 +1121,27 @@ def _row_to_source_binding(row: sqlite3.Row) -> AsyncThreadSourceBinding:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _row_to_source_binding_outbox(row: sqlite3.Row, *, include_envelope: bool = True) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": int(row["id"]),
+        "bindingId": row["binding_id"],
+        "upstreamEventId": int(row["upstream_event_id"]),
+        "athEventId": row["ath_event_id"],
+        "eventType": row["event_type"] or "",
+        "action": row["action"] or "",
+        "status": row["status"] or "pending",
+        "attempts": int(row["attempts"] or 0),
+        "httpStatus": row["http_status"],
+        "receiverStatus": row["receiver_status"] or "",
+        "lastError": row["last_error"] or "",
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+    if include_envelope:
+        payload["envelope"] = _parse_json_object(row["envelope_json"])
+    return payload
 
 
 def _row_to_event(row: sqlite3.Row) -> AsyncThreadEventLog:
