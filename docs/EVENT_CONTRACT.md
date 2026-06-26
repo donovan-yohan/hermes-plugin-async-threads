@@ -159,7 +159,7 @@ Idempotency means the producer can retry safely without creating duplicate visib
 - Reuse the same `eventId` when retrying the same real-world event.
 - Use a new `eventId` when the real-world event changes.
 - If immediate dispatch fails, the receiver clears the seen marker so the producer can retry.
-- If the event is coalesced, the current MVP accepts it into a debounce bucket before final digest dispatch. Retry semantics for failed coalesced digest dispatch are being hardened in issue #30.
+- If the event is coalesced, the current MVP accepts it into a debounce bucket before final digest dispatch. Coalesced retry behavior should be treated as queued until the digest has actually delivered or failed retryably.
 - After successful delivery or queueing, a retry returns `duplicate`.
 
 ## Response shapes

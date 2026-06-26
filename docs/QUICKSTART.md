@@ -1,6 +1,19 @@
-# Quickstart
+# Getting started: agent-first async-thread wakeups
 
 This quickstart exercises the current gateway-local MVP. It assumes a Hermes gateway process is running with the target platform adapter connected in the same profile/process as the `async_threads` receiver.
+
+![Getting started infographic showing plugin enablement, user ask, ATH model tools, safe producer handoff, and signed event delivery back to the same thread](assets/getting-started-agent-first.png)
+
+## What this proves
+
+By the end, you should have verified the default public workflow:
+
+1. a user asks Hermes naturally from the conversation that should be woken later;
+2. Hermes uses model-facing ATH tools to create a listener and producer handoff;
+3. the producer signs one compact event with the generated secret-file reference;
+4. ATH validates, de-dupes, and routes the event back to the same mapped gateway conversation.
+
+Manual `/ath` commands are still available for operators, but the happy path is agent tools first.
 
 ## Prerequisites
 
@@ -61,50 +74,48 @@ The agent should use the model-facing ATH tools instead of making you learn `/at
 3. Give the producer the generated `contractFile`, helper file, or `ATH_SECRET_FILE` path. The raw HMAC secret is not printed in normal tool output.
 4. Verify delivery with `ath_trace_event` or `/ath trace <event_id>`.
 
-A successful listener result includes:
+Typical listener creation intent:
+
+```json
+{
+  "purpose": "watch this demo async job and report back here when it finishes",
+  "producer_hint": "demo",
+  "event_kinds": ["finished", "failed"],
+  "delivery": "agent_queue",
+  "target": "current_conversation",
+  "max_turns": 1,
+  "max_tool_calls": 0,
+  "timeout_seconds": 120
+}
+```
+
+Typical handoff intent:
+
+```json
+{
+  "thread_key": "ath_...",
+  "mode": "local_script"
+}
+```
+
+A successful listener/handoff gives the agent producer-safe references such as:
 
 - `threadKey`
 - receiver URL
 - `secretFile` path
 - `contractFile` path
+- optional helper/emitter file path
 
 Save the `threadKey` and pass the `secretFile` path to the producer through a local secret manager, mounted file, or `ATH_SECRET_FILE`. The generated `secret.txt` is written without a trailing newline, so producer examples read the file text directly. The raw secret is not printed in normal command/tool output.
 
-## Manual `/ath` path: admin/debug/power users
-
-Manual listener creation is still supported when you explicitly want to administer ATH yourself:
-
-```text
-/ath listen demo --events demo.job.finished --ack brief --label "demo async job"
-```
-
-Useful management/debug commands:
-
-```text
-/ath status
-/ath list
-/ath events [thread_key] [--limit N]
-/ath trace <event_id> [--json]
-/ath workflows [thread_key] [--limit N]
-/ath inspect <thread_key>
-/ath emit-command <thread_key> --event event.type [--summary text]
-/ath rotate-secret <thread_key>
-/ath lifecycle [thread_key]
-/ath prune [--dry-run|--force] [--event-log-days N] [--seen-days N]
-/ath pause <thread_key>
-/ath resume <thread_key>
-/ath retire <thread_key>
-/ath revoke <thread_key>
-```
-
 ## Send a signed demo event
 
-Replace the environment variables with values from the tool-created listener/handoff or the manual `/ath listen` response.
+Replace the environment variables with values from the tool-created listener/handoff.
 
 ```bash
 export ATH_URL="http://127.0.0.1:8765/async-threads/v1/events"
 export ATH_THREAD_KEY="ath_..."
-export ATH_SECRET_FILE="/path/from/ath-listen/secret.txt"
+export ATH_SECRET_FILE="/path/from/handoff/secret.txt"
 
 python3 - <<'PY'
 import hashlib
@@ -148,10 +159,38 @@ PY
 Expected successful response:
 
 - `202` with `{"status":"accepted", ...}` for idle `agent_queue` continuation;
-- `202` with `{"status":"queued", ...}` if the target session is currently active;
-- `200` with `{"status":"delivered", ...}` for `--policy direct` listeners.
+- `202` with `{"status":"queued", ...}` if the target session is currently active or the event is inside a coalescing window;
+- `200` with `{"status":"delivered", ...}` for direct-delivery listeners.
 
-With `--ack brief`, the mapped gateway conversation should also receive a compact visible acknowledgement before the continuation is handed off or queued.
+With `ack: brief`, the mapped gateway conversation should also receive a compact visible acknowledgement before the continuation is handed off or queued.
+
+## Verify and debug
+
+Use model tools first when you are in an agent session:
+
+- `ath_trace_event` — inspect one event's delivery/de-dupe path.
+- `ath_get_listener` — inspect one listener without exposing secrets.
+- `ath_list_listeners` — list listeners scoped to the current owner/conversation.
+- `ath_retire_listener` — disable a listener and clean up producer-facing secret files.
+
+Manual `/ath` commands are the equivalent admin/debug surface for gateway operators:
+
+```text
+/ath status
+/ath list
+/ath events [thread_key] [--limit N]
+/ath trace <event_id> [--json]
+/ath workflows [thread_key] [--limit N]
+/ath inspect <thread_key>
+/ath emit-command <thread_key> --event event.type [--summary text]
+/ath rotate-secret <thread_key>
+/ath lifecycle [thread_key]
+/ath prune [--dry-run|--force] [--event-log-days N] [--seen-days N]
+/ath pause <thread_key>
+/ath resume <thread_key>
+/ath retire <thread_key>
+/ath revoke <thread_key>
+```
 
 ## Event fields
 

@@ -2,8 +2,8 @@
 
 `async-threads` has a CI-runnable harness that proves the assembled
 feedback-controller loop path end to end without real GitHub credentials, live
-Discord, or external secrets. It is the sample loop required by issue #83 and the
-deterministic simulated dogfood fixture required by issue #84.
+gateway delivery, or external secrets. It provides a deterministic public-safe
+evidence bundle for release review.
 
 It grades loop behavior, not performance. It complements the agent-tool UX
 harness in [`AGENT_TOOL_SCENARIOS.md`](AGENT_TOOL_SCENARIOS.md); that one proves
@@ -69,10 +69,10 @@ and the dogfood guarantees pass:
 }
 ```
 
-`acceptanceMap` is an honest map from each #83/#84/#76 acceptance criterion to the
-scenario, check, or dogfood field that proves it. The pytest smoke test
+`acceptanceMap` is an honest map from each release-readiness guarantee to the
+scenario, check, or evidence field that proves it. The pytest smoke test
 [`tests/test_loop_scenarios.py`](../tests/test_loop_scenarios.py) parses the
 report and fails locally before PR review if any loop guarantee regresses.
 
 The `--dogfood` evidence bundle is documented in
-[`LOOP_DOGFOOD.md`](LOOP_DOGFOOD.md).
+[`LOOP_EVIDENCE.md`](LOOP_EVIDENCE.md).

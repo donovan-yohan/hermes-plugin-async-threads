@@ -84,7 +84,7 @@ jobs:
               Path('docs/LOOP_EVENTS.md'),
               Path('docs/LOOP_SIGNAL_INGESTION.md'),
               Path('docs/LOOP_SCENARIO_HARNESS.md'),
-              Path('docs/LOOP_DOGFOOD.md'),
+              Path('docs/LOOP_EVIDENCE.md'),
               Path('skills/async-thread-agent-tools/SKILL.md'),
               Path('docs/design/STABLE_CONTINUATION_API.md'),
           ]

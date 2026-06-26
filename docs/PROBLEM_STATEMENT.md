@@ -188,34 +188,41 @@ Routes should declare max turn count, toolsets, model/budget, direct-delivery vs
 
 `hermes-plugin-async-threads` should provide:
 
-1. **Async-thread registry**
+1. **Model-facing agent tools**
+   - create or reuse a listener for the current gateway conversation;
+   - generate producer handoffs as contracts, helper files, or recipes;
+   - expose listener inspection, trace, retirement, and secret rotation without leaking raw HMAC secrets;
+   - make the natural-language agent path the default user experience.
+
+2. **Async-thread registry**
    - create/update thread handles;
    - map handles to gateway delivery origin;
    - store policy, producer scope, de-dupe state, and session references.
 
-2. **Webhook receiver**
+3. **Webhook receiver**
    - accept signed events;
    - validate producer and route scope;
    - de-dupe/replay-protect;
    - normalize into Hermes continuation requests.
 
-3. **Delivery/continuation dispatcher**
+4. **Delivery/continuation dispatcher**
    - direct-deliver small notifications when policy says so;
    - queue an agent continuation with explicit policy metadata when policy says agent continuation;
    - deliver output back into the mapped origin thread;
    - preserve enough context to feel like the same working conversation.
 
-4. **Config surface**
+5. **Config and policy surface**
    - route definitions;
    - producer secrets/tokens;
-   - max turn/tool/model policy;
+   - max turn/tool/model policy metadata;
    - rate limits;
    - actor trust filters;
-   - redaction settings.
+   - redaction settings;
+   - fail-closed behavior when strict hard continuation bounds are required but Hermes core cannot enforce them yet.
 
-5. **CLI/admin surface**
+6. **Manual admin/debug surface**
    - list async threads;
-   - create/register a thread manually;
+   - create/register a thread manually when explicitly requested;
    - revoke/pause a thread;
    - inspect recent events;
    - replay a safe event for testing.

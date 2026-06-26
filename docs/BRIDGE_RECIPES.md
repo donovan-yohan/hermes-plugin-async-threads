@@ -230,7 +230,7 @@ Terminal cleanup convention:
 - Treat event types like `*.goal.finished`, `*.phase.finished`, `*.session.finished`, and `*.run.finished` as terminal workflow events by default.
 - For single-goal listeners, declare terminal event types and enable auto-retire (`ath_create_listener(..., terminal_event_types=[...], auto_retire_on_terminal=true)` or `/ath listen ... --terminal-events ... --auto-retire-terminal`). ATH disables the listener after the authenticated terminal event is successfully delivered, and duplicate retries of the same event remain idempotent.
 - For shared listeners, set `shared_listener=true` or `/ath listen ... --shared-listener`; ATH records the terminal event and reports the listener as stale, but it does not retire it automatically.
-- Producer loops should self-exit after emitting a terminal event. Do not keep polling GitHub/session state forever after `goal.finished`, `run.finished`, etc. this is the dumb leak this plugin is explicitly trying to avoid.
+- Producer loops should self-exit after emitting a terminal event. Do not keep polling GitHub/session state forever after `goal.finished`, `run.finished`, etc.; ATH is meant to remove that cleanup-prone polling loop.
 
 Use `/ath lifecycle` to surface enabled listeners with terminal events, `/ath workflows <thread_key>` for current state, `/ath trace <event-id>` for one event's delivery path, and `/ath retire <thread_key>` when a temporary listener should stop accepting events after merge or abandonment.
 

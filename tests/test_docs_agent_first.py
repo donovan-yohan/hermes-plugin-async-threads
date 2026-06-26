@@ -18,18 +18,19 @@ def test_readme_teaches_agent_happy_path_before_manual_ath():
     assert "gateway commands for manual admin/debug" in text
     assert "Current Hermes core does not expose plugin-local hard caps" in text
     assert "fail-closed mode" in text
+    assert "The default public UX is **agent-first**" in text
 
 
 def test_quickstart_distinguishes_agent_happy_path_from_manual_admin():
     text = _read("docs/QUICKSTART.md")
 
     happy = text.index("## Agent happy path")
-    manual = text.index("## Manual `/ath` path")
     signed_event = text.index("## Send a signed demo event")
-    assert happy < manual < signed_event
+    manual = text.index("Manual `/ath` commands are the equivalent admin/debug surface")
+    assert happy < signed_event < manual
     assert "watch this demo async job and report back here when it finishes" in text
     assert "model-facing ATH tools" in text
-    assert "admin/debug/power users" in text
+    assert "getting-started-agent-first.png" in text
     assert "source contexts fail closed" in text
 
 
