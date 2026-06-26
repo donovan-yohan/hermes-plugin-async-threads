@@ -21,6 +21,7 @@ from async_threads.tools import (
     ath_generate_producer_handoff_tool,
     ath_get_listener_tool,
     ath_get_source_binding_tool,
+    ath_dry_run_source_binding_tool,
     ath_list_listeners_tool,
     ath_list_source_bindings_tool,
     ath_retire_listener_tool,
@@ -790,6 +791,17 @@ def test_source_binding_tools_create_list_inspect_and_retire_without_listener_si
     no_owner = _loads(ath_get_source_binding_tool({"binding_id": binding["bindingId"]}, **_tool_kwargs(registry, tmp_path, entry=_entry(_source(user_id="")))))
     assert no_owner["ok"] is False
     assert no_owner["error"] == "owner_unavailable"
+
+    malformed_db = tmp_path / "malformed-kanban.db"
+    malformed_db.write_text("not a sqlite database", encoding="utf-8")
+    dry_run_error = _loads(
+        ath_dry_run_source_binding_tool(
+            {"binding_id": binding["bindingId"], "board_db_path": str(malformed_db)},
+            **_tool_kwargs(registry, tmp_path),
+        )
+    )
+    assert dry_run_error["error"] == "kanban_read_failed"
+    assert dry_run_error["events"] == [{"action": "invalid_binding", "reason": "kanban_read_failed"}]
 
     paused = _loads(ath_set_source_binding_status_tool({"binding_id": binding["bindingId"], "status": "paused"}, **_tool_kwargs(registry, tmp_path)))
     assert paused["binding"]["status"] == "paused"

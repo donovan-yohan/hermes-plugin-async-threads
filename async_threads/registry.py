@@ -17,6 +17,7 @@ from typing import Any, Iterable, Mapping
 from .continuation import ContinuationPolicy
 from .lifecycle import LifecyclePolicy
 from .privacy import redact_metadata_text, redact_secret_text, safe_event_id, sanitize_untrusted_value
+from .source_filters import KANBAN_DEFAULT_EVENT_TYPES, source_binding_event_types
 from .workflows import WorkflowPolicy, apply_workflow_transition, normalize_workflow_event
 
 
@@ -877,7 +878,11 @@ class AsyncThreadRegistry:
             return {**base, "reason": "listener_disabled"}
         if binding.producer_id != handle.producer_id:
             return {**base, "reason": "producer_mismatch"}
-        required_events = _source_binding_event_types(binding.event_filter)
+        required_events = source_binding_event_types(
+            binding.source,
+            binding.event_filter,
+            default_event_types=KANBAN_DEFAULT_EVENT_TYPES if binding.source == "kanban" else (),
+        )
         missing = sorted(set(required_events).difference(handle.allowed_event_types)) if handle.allowed_event_types else []
         if missing:
             return {**base, "reason": "disallowed_event_types", "missingEventTypes": [redact_metadata_text(item) for item in missing]}
@@ -1023,16 +1028,6 @@ def _redacted_mapping(value: Mapping[str, Any] | None) -> dict[str, Any]:
         return {}
     cleaned = sanitize_untrusted_value(dict(value))
     return cleaned if isinstance(cleaned, dict) else {}
-
-
-def _source_binding_event_types(event_filter: Mapping[str, Any]) -> tuple[str, ...]:
-    for key in ("eventTypes", "event_types", "allowedEventTypes", "allowed_event_types"):
-        raw = event_filter.get(key) if isinstance(event_filter, Mapping) else None
-        if isinstance(raw, str):
-            return tuple(item.strip() for item in raw.split(",") if item.strip())
-        if isinstance(raw, Iterable) and not isinstance(raw, (bytes, bytearray, str)):
-            return tuple(str(item).strip() for item in raw if str(item).strip())
-    return ()
 
 
 def _parse_json_object(value: str | None) -> dict[str, Any]:

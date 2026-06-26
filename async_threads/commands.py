@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 from .adapter import registry_from_config, registry_path_from_config
+from .kanban import KANBAN_READ_FAILURE_EXCEPTIONS, dry_run_kanban_source_binding, kanban_read_failed_report
 from .listeners import ListenValidationError, create_listener
 from .origin import remember_gateway_origin
 from .privacy import redact_metadata_text, redact_secret_text, safe_event_id
@@ -31,6 +32,7 @@ commands:
   /ath lifecycle [thread_key]
   /ath prune [--dry-run|--force] [--event-log-days N] [--seen-days N]
   /ath bind-source <source> <thread_key> [--board board] [--source-ref k=v,...] [--producer id] [--events a,b] [--policy agent_queue|direct]
+  /ath dry-run-binding <binding_id> [--db path] [--since N] [--limit N] [--json]
   /ath bindings [--source source] [--include-retired]
   /ath inspect-binding <binding_id>
   /ath pause-binding <binding_id>
@@ -116,6 +118,8 @@ def _run_command(raw_args: str, *, event: Any, gateway: Any) -> str:
         return _cmd_prune(registry, argv[1:], config=config, owner_user_id=owner_user_id)
     if command in {"bind-source", "bind_source"}:
         return _cmd_bind_source(registry, argv[1:], owner_user_id=owner_user_id)
+    if command in {"dry-run-binding", "dry_run_binding", "preview-binding", "preview_binding"} and len(argv) >= 2:
+        return _cmd_dry_run_binding(registry, argv[1], argv[2:], owner_user_id=owner_user_id)
     if command in {"bindings", "source-bindings", "source_bindings"}:
         return _cmd_bindings(registry, argv[1:], owner_user_id=owner_user_id)
     if command in {"inspect-binding", "inspect_binding"} and len(argv) >= 2:
@@ -384,37 +388,80 @@ def _cmd_emit_command(registry: Any, thread_key: str, args: list[str], *, gatewa
     safe_summary = _display_text(summary, 160)
     return (
         "sandbox-safe ATH emit template\n"
-        "- set ATH_SECRET outside prompts/logs; this template does not print it.\n"
+        "- set ATH_SECRET_FILE outside prompts/logs; this template does not print it.\n"
+        "- standalone: only Python standard library is required in the producer sandbox.\n"
         "```bash\n"
         f"export ATH_URL={shlex.quote(url)}\n"
         f"export ATH_THREAD_KEY={shlex.quote(handle.thread_key)}\n"
         f"export ATH_PRODUCER_ID={shlex.quote(producer)}\n"
         "export ATH_SECRET_FILE=/path/to/ath-secret-file\n"
-        "ATH_SECRET=$(cat \"$ATH_SECRET_FILE\") python3 - <<'PY'\n"
+        "python3 - <<'PY'\n"
         "import hashlib, hmac, json, os, time, urllib.error, urllib.request\n"
-        "body = {\n"
+        "SUCCESS_STATUSES = {'delivered', 'accepted', 'queued', 'duplicate'}\n"
+        "RETRYABLE_HTTP = {408, 409, 425, 429, 500, 502, 503, 504}\n"
+        "def emit_public(result):\n"
+        "    print(json.dumps(result, sort_keys=True))\n"
+        "    raise SystemExit(0 if result.get('success') else (75 if result.get('retryable') else 1))\n"
+        "def local_config_error(message):\n"
+        "    emit_public({'success': False, 'retryable': False, 'duplicate': False, 'status': 'local_config_error', 'error': str(message)})\n"
+        "secret_file = os.environ.get('ATH_SECRET_FILE', '')\n"
+        "if not secret_file:\n"
+        "    local_config_error('ATH_SECRET_FILE is required')\n"
+        "try:\n"
+        "    with open(secret_file, 'r', encoding='utf-8') as fh:\n"
+        "        secret = fh.read()\n"
+        "except OSError as exc:\n"
+        "    local_config_error(exc)\n"
+        "if not secret:\n"
+        "    local_config_error('ATH secret is required')\n"
+        "body_obj = {\n"
         "    'version': 'async-thread-event/v1',\n"
-        "    'eventId': f\"manual-{int(time.time())}\",\n"
+        "    'eventId': os.environ.get('ATH_EVENT_ID', 'manual-' + str(int(time.time()))),\n"
         f"    'eventType': {event!r},\n"
         "    'producer': {'id': os.environ['ATH_PRODUCER_ID']},\n"
         "    'occurredAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),\n"
         "    'asyncThread': {'threadKey': os.environ['ATH_THREAD_KEY']},\n"
         f"    'summary': {safe_summary!r},\n"
         "    'tailMode': 'compact',\n"
-        "    'payload': {'status': 'ready'},\n"
+        "    'payload': {'status': os.environ.get('ATH_STATUS', 'ready')},\n"
         "}\n"
-        "raw = json.dumps(body, sort_keys=True, separators=(',', ':')).encode()\n"
-        "sig = hmac.new(os.environ['ATH_SECRET'].encode(), raw, hashlib.sha256).hexdigest()\n"
-        "req = urllib.request.Request(os.environ['ATH_URL'], data=raw, method='POST', headers={'Content-Type':'application/json','X-Hermes-Signature-256':'sha256='+sig})\n"
+        "body = json.dumps(body_obj, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8')\n"
+        "sig = hmac.new(secret.encode('utf-8'), body, hashlib.sha256).hexdigest()\n"
+        "headers = {'Content-Type': 'application/json', 'X-Hermes-Signature-256': 'sha256=' + sig}\n"
+        "req = urllib.request.Request(os.environ['ATH_URL'], data=body, method='POST', headers=headers)\n"
+        "def classify(http_status, response_body='', error=''):\n"
+        "    text = response_body.decode('utf-8', 'replace') if isinstance(response_body, bytes) else str(response_body or '')\n"
+        "    text = text.replace(secret, '<redacted>')\n"
+        "    safe_error = str(error or '').replace(secret, '<redacted>')\n"
+        "    parsed_status = ''\n"
+        "    try:\n"
+        "        parsed = json.loads(text) if text else {}\n"
+        "        if isinstance(parsed, dict):\n"
+        "            parsed_status = str(parsed.get('status') or '')\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    receiver_status = parsed_status or ('transport_error' if http_status is None else '')\n"
+        "    success = bool(http_status is not None and 200 <= http_status < 300 and receiver_status in SUCCESS_STATUSES)\n"
+        "    retryable = (http_status is None) or (http_status in RETRYABLE_HTTP)\n"
+        "    if success:\n"
+        "        retryable = False\n"
+        "    result = {'success': success, 'retryable': retryable, 'duplicate': receiver_status == 'duplicate', 'status': receiver_status}\n"
+        "    if http_status is not None:\n"
+        "        result['httpStatus'] = http_status\n"
+        "    if text:\n"
+        "        result['body'] = text\n"
+        "    if safe_error:\n"
+        "        result['error'] = safe_error\n"
+        "    emit_public(result)\n"
         "try:\n"
-        "    with urllib.request.urlopen(req, timeout=20) as res:\n"
-        "        print(res.status); print(res.read().decode())\n"
-        "except urllib.error.HTTPError as err:\n"
-        "    print(f'HTTP Error {err.code}: {err.read().decode()}')\n"
-        "except urllib.error.URLError as err:\n"
-        "    print(f'URL Error: {err.reason}')\n"
-        "except Exception as err:\n"
-        "    print(f'Error: {err}')\n"
+        "    with urllib.request.urlopen(req, timeout=float(os.environ.get('ATH_TIMEOUT', '20'))) as res:\n"
+        "        classify(int(res.status), res.read())\n"
+        "except urllib.error.HTTPError as exc:\n"
+        "    classify(int(exc.code), exc.read())\n"
+        "except urllib.error.URLError as exc:\n"
+        "    classify(None, error=getattr(exc, 'reason', exc))\n"
+        "except OSError as exc:\n"
+        "    classify(None, error=exc)\n"
         "PY\n"
         "```"
     )
@@ -575,6 +622,78 @@ def _cmd_bind_source(registry: Any, args: list[str], *, owner_user_id: str) -> s
         f"filter: {_format_binding_map(binding.event_filter)}\n"
         f"status: `{binding.status}` compatibility=`{_display_text(compatibility.get('reason'), 80)}` failClosed=`{compatibility.get('failClosed')}`"
     )
+
+
+def _cmd_dry_run_binding(registry: Any, binding_id: str, args: list[str], *, owner_user_id: str) -> str:
+    if not owner_user_id:
+        return "async-thread source binding not found."
+    binding = registry.get_source_binding(binding_id=binding_id, owner_user_id=owner_user_id)
+    if binding is None:
+        return "async-thread source binding not found."
+    board_db_path = ""
+    since_event_id: int | None = None
+    limit = 100
+    as_json = False
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--db" and i + 1 < len(args):
+            board_db_path = args[i + 1]
+            i += 2
+            continue
+        if arg == "--since" and i + 1 < len(args):
+            try:
+                since_event_id = max(0, int(args[i + 1]))
+            except ValueError:
+                return "invalid --since event id. use a non-negative integer."
+            i += 2
+            continue
+        if arg == "--limit" and i + 1 < len(args):
+            try:
+                limit = max(1, min(int(args[i + 1]), 500))
+            except ValueError:
+                return "invalid --limit. use an integer 1-500."
+            i += 2
+            continue
+        if arg == "--json":
+            as_json = True
+            i += 1
+            continue
+        return "usage: /ath dry-run-binding <binding_id> [--db path] [--since N] [--limit N] [--json]"
+    try:
+        report = dry_run_kanban_source_binding(
+            registry=registry,
+            binding=binding,
+            board_db_path=board_db_path or None,
+            since_event_id=since_event_id,
+            limit=limit,
+        )
+    except KANBAN_READ_FAILURE_EXCEPTIONS as exc:
+        report = kanban_read_failed_report(binding, exc)
+    if as_json:
+        return json.dumps(report, sort_keys=True, indent=2)
+    counts = report.get("counts", {}) if isinstance(report, dict) else {}
+    cursor = report.get("cursor", {}) if isinstance(report, dict) else {}
+    lines = [
+        "async-thread source binding dry-run",
+        f"bindingId: `{_display_metadata(binding.binding_id, 80)}`",
+        f"source: `{_display_metadata(binding.source, 40)}` board=`{_display_metadata(report.get('board', ''), 80)}`",
+        f"would_emit: {counts.get('would_emit', 0)} suppressed: {counts.get('suppressed', 0)} would_coalesce: {counts.get('would_coalesce', 0)} invalid_binding: {counts.get('invalid_binding', 0)}",
+    ]
+    if cursor:
+        lines.append(f"cursor: from={cursor.get('fromEventId')} wouldAdvanceTo={cursor.get('wouldAdvanceToEventId')} advanced=false")
+    for item in list(report.get("events", []))[:10]:
+        action = _display_text(item.get("action", ""), 40)
+        event_id = _display_metadata(item.get("eventId", item.get("upstreamEventId", "")), 80)
+        event_type = _display_metadata(item.get("eventType", item.get("digestEventType", "")), 80)
+        reason = _display_text(item.get("reason", ""), 80)
+        reason_text = f" reason={reason}" if reason else ""
+        type_text = f" type={event_type}" if event_type else ""
+        lines.append(f"- {action} id={event_id}{type_text}{reason_text}")
+    if len(report.get("events", [])) > 10:
+        lines.append(f"... {len(report.get('events', [])) - 10} more events omitted; rerun with --json for full dry-run data.")
+    lines.append("dry-run only: no events sent and cursor was not advanced.")
+    return "\n".join(lines)
 
 
 def _cmd_bindings(registry: Any, args: list[str], *, owner_user_id: str) -> str:

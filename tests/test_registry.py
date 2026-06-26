@@ -168,6 +168,30 @@ def test_source_binding_registry_owner_scope_lifecycle_and_compatibility(tmp_pat
     assert reg.list_source_bindings(owner_user_id="u1", include_retired=True)[0].status == "retired"
 
 
+def test_source_binding_compatibility_resolves_kanban_event_kinds_to_event_types(tmp_path: Path):
+    reg = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    listener = reg.create_handle(
+        source={"platform": "discord", "chat_id": "c", "thread_id": "t", "chat_type": "channel"},
+        producer_id="ath-kanban-bridge",
+        allowed_event_types=["kanban.task.completed"],
+        owner_user_id="u1",
+    )
+    binding = reg.create_source_binding(
+        owner_user_id="u1",
+        source="kanban",
+        source_ref={"board": "default"},
+        listener_thread_key=listener.thread_key,
+        event_filter={"eventKinds": ["completed", "review-required"]},
+    )
+
+    compatibility = reg.source_binding_compatibility(binding)
+
+    assert compatibility["reason"] == "disallowed_event_types"
+    assert compatibility["missingEventTypes"] == ["kanban.task.ready_for_review"]
+    assert compatibility["valid"] is False
+    assert compatibility["failClosed"] is True
+
+
 def test_normalize_workflow_event_ignores_non_mapping_payloads():
     assert normalize_workflow_event([], {"event_id": "evt", "event_type": "job.progress", "summary": "ignored"}) is None
     assert normalize_workflow_event("not-json-object", {"event_id": "evt", "event_type": "job.progress"}) is None

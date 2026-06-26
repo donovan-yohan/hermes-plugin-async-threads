@@ -197,6 +197,8 @@ Bridge checklist:
 
 For native board integrations, persist this routing as a source binding instead of a cron poller. Bind `source=kanban` plus the board ref to an existing listener with `/ath bind-source kanban <thread_key> --board <board> --events kanban.task.blocked,kanban.task.completed,...`, or use the model-facing `ath_create_source_binding` tool. Listing/inspection redacts secret-shaped material and reports listener compatibility fail-closed; pausing or retiring a binding never retires the underlying listener.
 
+Before enabling a runner, preview the durable `task_events` cursor with `/ath dry-run-binding <binding_id> --db /path/to/kanban.db --since <event_id> --json` or the model-facing `ath_dry_run_source_binding` tool. Dry-run reports `would_emit`, `suppressed`, `would_coalesce`, and `invalid_binding`, does not POST signed events, and does not advance the binding cursor. The transform uses `eventId=<board>:<task_id>:<task_event_id>`, `seriesKey=kanban:<board>:<task_id>`, and `workflowId=kanban:<board>:<task_id>`; it omits task bodies, raw comments, transcripts, logs, and secret-shaped fields.
+
 ## Repeated artifact revisions
 
 When several events describe one logical artifact, use a stable `seriesKey` plus a revision field:

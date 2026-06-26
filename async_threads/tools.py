@@ -10,6 +10,7 @@ from typing import Any, Iterable, Mapping
 from .continuation import ContinuationPolicy
 from .adapter import registry_from_config
 from .handoffs import build_producer_handoff, handoff_root_from_config
+from .kanban import KANBAN_READ_FAILURE_EXCEPTIONS, dry_run_kanban_source_binding, kanban_read_failed_report
 from .listeners import ListenValidationError, create_listener
 from .origin import OriginResolution, resolve_current_origin
 from .privacy import redact_metadata_text, safe_event_id
@@ -182,6 +183,21 @@ _SOURCE_BINDING_STATUS_SCHEMA = {
     },
 }
 
+_DRY_RUN_SOURCE_BINDING_SCHEMA = {
+    "name": "ath_dry_run_source_binding",
+    "description": "Preview a source binding without sending ATH events or advancing its cursor. Currently supports source=kanban task_events transforms.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "binding_id": {"type": "string", "description": "Source binding id."},
+            "board_db_path": {"type": "string", "description": "Kanban board SQLite DB path for source=kanban dry-run."},
+            "since_event_id": {"type": "integer", "description": "Override cursor event id for preview only."},
+            "limit": {"type": "integer", "description": "Max upstream rows to preview, 1-500. Default 100."},
+        },
+        "required": ["binding_id"],
+    },
+}
+
 
 def register_tools(ctx: Any) -> None:
     """Register model-facing ATH tools through PluginContext."""
@@ -272,6 +288,14 @@ def register_tools(ctx: Any) -> None:
         schema=_SOURCE_BINDING_STATUS_SCHEMA,
         handler=ath_set_source_binding_status_tool,
         description=_SOURCE_BINDING_STATUS_SCHEMA["description"],
+        emoji="🧵",
+    )
+    ctx.register_tool(
+        name="ath_dry_run_source_binding",
+        toolset=TOOLSET,
+        schema=_DRY_RUN_SOURCE_BINDING_SCHEMA,
+        handler=ath_dry_run_source_binding_tool,
+        description=_DRY_RUN_SOURCE_BINDING_SCHEMA["description"],
         emoji="🧵",
     )
 
@@ -542,6 +566,29 @@ def ath_set_source_binding_status_tool(args: dict[str, Any], **kwargs: Any) -> s
         return _json(_error("not_found", "source binding not found"))
     binding = registry.get_source_binding(binding_id=binding_id, owner_user_id=origin.owner_user_id)
     return _json({"ok": True, "action": status, "binding": _source_binding_summary(registry, binding) if binding else {"bindingId": binding_id, "status": status}})
+
+
+def ath_dry_run_source_binding_tool(args: dict[str, Any], **kwargs: Any) -> str:
+    registry, _config = _registry_and_config(kwargs)
+    origin = _resolve_origin(kwargs)
+    if not origin.ok:
+        return _json(origin.public_error())
+    if not origin.owner_user_id:
+        return _json(_error("owner_unavailable", "current gateway user is unavailable"))
+    binding = registry.get_source_binding(binding_id=str(args.get("binding_id") or ""), owner_user_id=origin.owner_user_id)
+    if binding is None:
+        return _json(_error("not_found", "source binding not found"))
+    try:
+        report = dry_run_kanban_source_binding(
+            registry=registry,
+            binding=binding,
+            board_db_path=str(args.get("board_db_path") or "") or None,
+            since_event_id=args.get("since_event_id") if "since_event_id" in args else None,
+            limit=_bounded_int(args.get("limit"), default=100, minimum=1, maximum=500),
+        )
+    except KANBAN_READ_FAILURE_EXCEPTIONS as exc:
+        report = kanban_read_failed_report(binding, exc)
+    return _json(report)
 
 
 def _registry_and_config(kwargs: Mapping[str, Any]) -> tuple[AsyncThreadRegistry, Any]:
