@@ -88,7 +88,7 @@ jobs:
               Path('skills/async-thread-agent-tools/SKILL.md'),
               Path('docs/design/STABLE_CONTINUATION_API.md'),
           ]
-          banned = re.compile(r'\b(typeline|kanban|\bebi\b|wc-typeline|ultracode)\b', re.I)
+          banned = re.compile(r'\b(typeline|\bebi\b|wc-typeline|ultracode)\b', re.I)
           leaks = []
           for path in docs:
               for number, line in enumerate(path.read_text(encoding='utf-8').splitlines(), start=1):

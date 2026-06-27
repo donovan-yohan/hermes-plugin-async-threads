@@ -14,7 +14,7 @@ This repository is an MVP. It is useful, but it is not a blanket promise that ev
 
 | Surface | Status |
 | --- | --- |
-| Discord gateway sessions | Unit-tested dispatch path with mock adapter; live gateway smoke pending |
+| Discord gateway sessions | Unit-tested dispatch path plus live Kanban source-binding dogfood in a gateway profile |
 | Telegram gateway sessions | Metadata helper covered for DM/topic routing; live gateway smoke pending |
 | Slack gateway sessions | Generic thread metadata covered; live gateway smoke pending |
 | Other gateway adapters | Intended, unverified |
@@ -41,6 +41,7 @@ Good fits:
 ## Start here
 
 - [`docs/QUICKSTART.md`](docs/QUICKSTART.md) — install/configure the plugin and run an agent-first signed demo.
+- [`examples/kanban-source-binding/README.md`](examples/kanban-source-binding/README.md) — bind a Kanban board to an existing listener, dry-run, enable the native runner, and trace delivery without cron.
 - [`skills/async-thread-agent-tools/SKILL.md`](skills/async-thread-agent-tools/SKILL.md) — reusable guidance for Hermes agents using ATH tools.
 - [`docs/EVENT_CONTRACT.md`](docs/EVENT_CONTRACT.md) — producer-facing `async-thread-event/v1` contract and JSON Schema.
 - [`docs/BRIDGE_RECIPES.md`](docs/BRIDGE_RECIPES.md) — local jobs, repo/review lanes, Kanban source bindings, dry-run/runner diagnostics, emit-command, lifecycle, trace, and prune recipes.

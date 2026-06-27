@@ -164,6 +164,49 @@ Expected successful response:
 
 With `ack: brief`, the mapped gateway conversation should also receive a compact visible acknowledgement before the continuation is handed off or queued.
 
+## Optional: bind a Kanban board without cron
+
+Source bindings are the native path for durable upstream streams such as Hermes Kanban boards. A binding is separate from the listener: it points a source at an existing `threadKey`, keeps its own cursor/outbox state, and can be paused or retired without retiring the listener.
+
+Use this when the board itself records material task transitions and you want the original Hermes conversation to wake only for meaningful changes.
+
+Natural-language ask from the mapped conversation:
+
+```text
+bind Kanban board ath to listener ath_... through producer ath-kanban-bridge; wake this thread only for blocked, completed, crashed, gave_up, timed_out, and ready_for_review transitions; dry-run before enabling the runner
+```
+
+Expected model-facing tool path:
+
+1. `ath_create_source_binding` with `source: "kanban"`, a board ref, the existing `listener_thread_key`, a producer id, and a narrow `event_filter` allowlist.
+2. `ath_dry_run_source_binding` with the returned binding id and Kanban DB path. Dry-run previews `would_emit`, `suppressed`, `would_coalesce`, `invalid_binding`, and cursor movement without sending events.
+3. `ath_get_source_binding` to inspect compatibility, cursor, lag, and redacted outbox diagnostics.
+4. Enable the config-gated runner and restart the gateway. This is not a Hermes cron job.
+5. Trigger one disposable material transition and verify it with `ath_trace_event` or `/ath trace`.
+
+Runner config:
+
+```yaml
+platforms:
+  async_threads:
+    enabled: true
+    extra:
+      source_binding_runner_enabled: true
+      source_binding_runner_interval_seconds: 30
+      source_binding_runner_limit: 100
+```
+
+Manual admin/debug equivalents:
+
+```text
+/ath bind-source kanban ath_... --board ath --producer ath-kanban-bridge --events kanban.task.blocked,kanban.task.completed,kanban.task.crashed,kanban.task.gave_up,kanban.task.timed_out,kanban.task.ready_for_review
+/ath dry-run-binding <binding_id> --db /absolute/path/to/kanban.db --json
+/ath inspect-binding <binding_id>
+/ath trace <event_id> --json
+```
+
+See [`../examples/kanban-source-binding/README.md`](../examples/kanban-source-binding/README.md) for a copy/paste operator walkthrough.
+
 ## Verify and debug
 
 Use model tools first when you are in an agent session:
@@ -172,6 +215,8 @@ Use model tools first when you are in an agent session:
 - `ath_get_listener` — inspect one listener without exposing secrets.
 - `ath_list_listeners` — list listeners scoped to the current owner/conversation.
 - `ath_retire_listener` — disable a listener and clean up producer-facing secret files.
+- `ath_get_source_binding` / `ath_list_source_bindings` — inspect source-binding compatibility, cursor, lag, and redacted outbox state.
+- `ath_set_source_binding_status` — pause, resume, or retire a binding without changing the listener lifecycle.
 
 Manual `/ath` commands are the equivalent admin/debug surface for gateway operators:
 
