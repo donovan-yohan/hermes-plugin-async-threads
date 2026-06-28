@@ -13,6 +13,7 @@ from async_threads.commands import (
     _cmd_bindings,
     _cmd_inspect,
     _cmd_inspect_binding,
+    _cmd_payload,
     _cmd_lifecycle,
     _cmd_list,
     _cmd_prune,
@@ -198,6 +199,39 @@ def test_events_command_redacts_bare_secret_shapes(tmp_path):
     for secret in secrets:
         assert secret not in output
     assert "<redacted>" in output or "redacted:" in output
+
+
+def test_payload_command_fetches_redacted_payload_and_blocks_raw_without_raw_storage(tmp_path):
+    from async_threads.ingress_digest import resolve_ingress_digest_policy
+
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    handle = registry.create_handle(
+        source={"platform": "discord", "chat_id": "c", "chat_type": "channel", "thread_id": "t"},
+        producer_id="example-ci",
+        owner_user_id="u1",
+        ingress_digest_policy={"enabled": True, "mode": "pointer_summary", "store_event": "redacted"},
+    )
+    policy = resolve_ingress_digest_policy(listener_policy=handle.ingress_digest_policy)
+    record = registry.store_event_payload(
+        handle=handle,
+        data={"payload": {"token": "secret-token", "safe": "ok"}},
+        fields={"producer_id": "example-ci", "event_id": "evt-payload", "event_type": "ci.build.finished", "summary": "done"},
+        policy=policy,
+    )
+    assert record is not None
+
+    output = _cmd_payload(registry, record.pointer_id, [], owner_user_id="u1")
+    raw_output = _cmd_payload(registry, record.pointer_id, ["--raw-local"], owner_user_id="u1")
+    json_output = json.loads(_cmd_payload(registry, "evt-payload", ["--json"], owner_user_id="u1"))
+
+    assert "async-thread event payload (untrusted data)" in output
+    assert "secret-token" not in output
+    assert "safe" in output
+    assert raw_output == "raw_local payload is unavailable for this event."
+    assert json_output["untrustedData"] is True
+    assert json_output["payload"]["payload"]["safe"] == "ok"
+    assert "secret-token" not in json.dumps(json_output, sort_keys=True)
+    assert _cmd_payload(registry, record.pointer_id, [], owner_user_id="u2") == "async-thread event payload not found."
 
 
 def test_command_display_redacts_secret_shapes_across_list_inspect_and_workflows(tmp_path):

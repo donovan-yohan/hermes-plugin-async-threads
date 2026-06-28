@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from async_threads import registry as registry_module
+from async_threads.ingress_digest import resolve_ingress_digest_policy
 from async_threads.registry import AsyncThreadRegistry, SCHEMA_VERSION, sanitize_event_detail
 from async_threads.workflows import WorkflowPolicy, normalize_workflow_event
 
@@ -190,6 +191,96 @@ def test_source_binding_compatibility_resolves_kanban_event_kinds_to_event_types
     assert compatibility["missingEventTypes"] == ["kanban.task.ready_for_review"]
     assert compatibility["valid"] is False
     assert compatibility["failClosed"] is True
+
+
+def test_ingress_digest_policy_precedence_and_payload_pointer_storage(tmp_path: Path):
+    reg = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    listener = reg.create_handle(
+        source={"platform": "discord", "chat_id": "c", "thread_id": "t", "chat_type": "channel"},
+        producer_id="ath-kanban-bridge",
+        owner_user_id="u1",
+        ingress_digest_policy={"enabled": True, "mode": "inline_summary", "store_event": "none"},
+    )
+    binding = reg.create_source_binding(
+        owner_user_id="u1",
+        source="kanban",
+        source_ref={"board": "default"},
+        listener_thread_key=listener.thread_key,
+        ingress_digest_policy={"enabled": True, "mode": "pointer_summary", "store_event": "raw_local", "retention_seconds": 600},
+    )
+    reg.upsert_source_binding_outbox(
+        binding_id=binding.binding_id,
+        upstream_event_id=42,
+        ath_event_id="evt-payload-pointer",
+        event_type="kanban.task.completed",
+        action="emit",
+    )
+
+    located = reg.find_source_binding_for_event(
+        thread_key=listener.thread_key,
+        producer_id="ath-kanban-bridge",
+        event_id="evt-payload-pointer",
+    )
+    assert located is not None
+    assert located.binding_id == binding.binding_id
+    policy = resolve_ingress_digest_policy(
+        global_policy={"enabled": True, "mode": "pointer"},
+        listener_policy=listener.ingress_digest_policy,
+        source_binding_policy=located.ingress_digest_policy,
+    )
+    assert policy.mode == "pointer_summary"
+    assert policy.store_event == "raw_local"
+    assert policy.source == "source_binding"
+
+    fields = {
+        "producer_id": "ath-kanban-bridge",
+        "event_id": "evt-payload-pointer",
+        "event_type": "kanban.task.completed",
+        "thread_key": listener.thread_key,
+        "summary": "done Bearer summary-token",
+    }
+    record = reg.store_event_payload(
+        handle=listener,
+        data={"payload": {"token": "payload-marker", "safe": "ok"}, "summary": "done Bearer summary-token"},
+        fields=fields,
+        policy=policy,
+        source_binding_id=binding.binding_id,
+    )
+
+    assert record is not None
+    assert record.pointer_id.startswith("athp_")
+    assert record.storage_mode == "raw_local"
+    assert record.source_binding_id == binding.binding_id
+    assert "payload-marker" not in json.dumps(record.redacted_payload, sort_keys=True)
+    assert record.raw_payload["payload"]["token"] == "payload-marker"
+    fetched = reg.get_event_payload(owner_user_id="u1", pointer_id=record.pointer_id)
+    assert fetched is not None
+    assert fetched.event_id == "evt-payload-pointer"
+    assert reg.get_event_payload(owner_user_id="u2", pointer_id=record.pointer_id) is None
+
+
+def test_ingress_digest_defaults_off_and_explicit_listener_disable_wins(tmp_path: Path):
+    reg = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    handle = reg.create_handle(
+        source={"platform": "discord", "chat_id": "c", "thread_id": "t", "chat_type": "channel"},
+        producer_id="relay",
+        owner_user_id="u1",
+    )
+    default_policy = resolve_ingress_digest_policy()
+    assert default_policy.active is False
+    assert reg.store_event_payload(
+        handle=handle,
+        data={"payload": {"status": "ok"}},
+        fields={"producer_id": "relay", "event_id": "evt-default-off", "event_type": "relay.done", "summary": "done"},
+        policy=default_policy,
+    ) is None
+
+    disabled = resolve_ingress_digest_policy(
+        global_policy={"enabled": True, "mode": "pointer_summary", "store_event": "redacted"},
+        listener_policy={"enabled": False},
+    )
+    assert disabled.active is False
+    assert disabled.source == "listener"
 
 
 def test_normalize_workflow_event_ignores_non_mapping_payloads():
