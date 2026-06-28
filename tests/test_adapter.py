@@ -200,6 +200,58 @@ async def test_ingress_digest_pointer_stores_after_auth_and_renders_pointer(tmp_
     assert "secret-token" not in rendered
 
 
+@pytest.mark.asyncio
+async def test_source_binding_ingress_digest_overrides_global_off_and_stores_payload(tmp_path):
+    config = PlatformConfig(
+        enabled=True,
+        extra={
+            "registry_path": str(tmp_path / "ath.sqlite3"),
+            "ingress_digest": {"enabled": False},
+        },
+    )
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(
+        source=source.to_dict(),
+        producer_id="ath-kanban-bridge",
+        owner_user_id="u1",
+        allowed_event_types=["kanban.task.completed"],
+    )
+    binding = registry.create_source_binding(
+        owner_user_id="u1",
+        source="kanban",
+        source_ref={"board": "ath"},
+        listener_thread_key=handle.thread_key,
+        ingress_digest_policy={"enabled": True, "mode": "pointer_summary", "store_event": "redacted"},
+    )
+    registry.upsert_source_binding_outbox(
+        binding_id=binding.binding_id,
+        upstream_event_id=42,
+        ath_event_id="evt-source-binding-pointer",
+        event_type="kanban.task.completed",
+        action="emit",
+    )
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: FakeTargetAdapter()})
+    body = _event_body(
+        handle,
+        event_id="evt-source-binding-pointer",
+        event_type="kanban.task.completed",
+        summary="source binding done",
+        payload={"token": "secret-token", "safe": "ok"},
+    )
+
+    result = await adapter._handle_event(FakeRequest(body, handle.secret))
+
+    assert result.status == 202
+    record = registry.get_event_payload(owner_user_id="u1", event_id="evt-source-binding-pointer")
+    assert record is not None
+    assert record.source_binding_id == binding.binding_id
+    assert record.storage_mode == "redacted"
+    assert record.diagnostics["source"] == "source_binding"
+    assert "secret-token" not in json.dumps(record.redacted_payload, sort_keys=True)
+
+
 def test_render_event_message_redacts_hostile_payload_before_prompt_text():
     text = render_event_message(
         {

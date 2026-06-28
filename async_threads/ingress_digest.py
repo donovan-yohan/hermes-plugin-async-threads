@@ -117,8 +117,9 @@ def resolve_ingress_digest_policy(
         if not raw:
             continue
         if _explicit_disable(raw):
-            return disabled_policy(source=name)
-        merged.update(raw)
+            merged = {"enabled": False}
+        else:
+            merged.update(raw)
         source = name
     if not merged:
         return disabled_policy(source="off")

@@ -259,6 +259,26 @@ def test_ingress_digest_policy_precedence_and_payload_pointer_storage(tmp_path: 
     assert reg.get_event_payload(owner_user_id="u2", pointer_id=record.pointer_id) is None
 
 
+def test_ingress_digest_higher_precedence_active_overrides_lower_explicit_off():
+    listener_policy = resolve_ingress_digest_policy(
+        global_policy={"enabled": False},
+        listener_policy={"enabled": True, "mode": "pointer_summary", "store_event": "redacted"},
+    )
+    assert listener_policy.active is True
+    assert listener_policy.mode == "pointer_summary"
+    assert listener_policy.store_event == "redacted"
+    assert listener_policy.source == "listener"
+
+    source_binding_policy = resolve_ingress_digest_policy(
+        global_policy={"enabled": False, "mode": "off"},
+        source_binding_policy={"enabled": True, "store_event": "raw_local"},
+    )
+    assert source_binding_policy.active is True
+    assert source_binding_policy.mode == "pointer_summary"
+    assert source_binding_policy.store_event == "raw_local"
+    assert source_binding_policy.source == "source_binding"
+
+
 def test_ingress_digest_defaults_off_and_explicit_listener_disable_wins(tmp_path: Path):
     reg = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
     handle = reg.create_handle(
