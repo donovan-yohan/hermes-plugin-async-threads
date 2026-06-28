@@ -595,7 +595,8 @@ class AsyncThreadRegistry:
         comparison is intentional for this fixed-width timestamp format.
         """
         if not owner_user_id:
-            return {"dry_run": dry_run, "event_log": 0, "seen_events": 0, "owner_scoped": False}
+            return {"dry_run": dry_run, "event_log": 0, "seen_events": 0, "event_payloads": 0, "owner_scoped": False}
+        payload_before = utc_now()
         with self._connect() as conn:
             if not dry_run:
                 conn.execute("BEGIN IMMEDIATE")
@@ -621,7 +622,17 @@ class AsyncThreadRegistry:
                     (owner_user_id, seen_before),
                 ).fetchone()[0]
             )
+            payload_count = int(
+                conn.execute(
+                    "select count(*) from event_payloads where owner_user_id = ? and expires_at < ?",
+                    (owner_user_id, payload_before),
+                ).fetchone()[0]
+            )
             if not dry_run:
+                conn.execute(
+                    "delete from event_payloads where owner_user_id = ? and expires_at < ?",
+                    (owner_user_id, payload_before),
+                )
                 conn.execute(
                     """
                     delete from event_log
@@ -650,8 +661,10 @@ class AsyncThreadRegistry:
             "dry_run": dry_run,
             "event_log": event_count,
             "seen_events": seen_count,
+            "event_payloads": payload_count,
             "event_log_before": event_log_before,
             "seen_before": seen_before,
+            "payload_before": payload_before,
             "owner_scoped": True,
         }
 
@@ -838,7 +851,7 @@ class AsyncThreadRegistry:
         params: list[Any] = [owner_user_id]
         if pointer_id:
             clauses.append("pointer_id = ?")
-            params.append(redact_metadata_text(pointer_id, max_chars=200))
+            params.append(_safe_pointer_id(pointer_id))
         elif event_id:
             clauses.append("event_id = ?")
             params.append(safe_event_id(event_id))
@@ -1426,6 +1439,10 @@ def _row_to_workflow_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 def _json_dump(value: Any) -> str:
     return json.dumps(value if isinstance(value, (dict, list)) else {}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _safe_pointer_id(value: Any) -> str:
+    return str(value or "").strip()[:200]
 
 
 def _redacted_mapping(value: Mapping[str, Any] | None) -> dict[str, Any]:

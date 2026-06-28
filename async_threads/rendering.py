@@ -147,7 +147,7 @@ def _render_pointer_event_message(
     payload_record: Any,
 ) -> str:
     mode = getattr(policy, "mode", "pointer")
-    pointer_id = redact_metadata_text(getattr(payload_record, "pointer_id", ""), max_chars=120)
+    pointer_id = str(getattr(payload_record, "pointer_id", "") or "")[:120]
     event_id = redact_metadata_text(getattr(payload_record, "event_id", ""), max_chars=120)
     digest = _record_digest(payload_record) if mode == "pointer_summary" else {}
     lines = [

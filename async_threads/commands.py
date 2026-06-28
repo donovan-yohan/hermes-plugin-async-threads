@@ -626,6 +626,7 @@ def _cmd_prune(registry: Any, args: list[str], *, config: Any, owner_user_id: st
         f"async-thread prune {'dry-run' if dry_run else 'complete'}\n"
         f"{action} event_log rows: {result['event_log']} before {event_cutoff}\n"
         f"{action} seen_events rows: {result['seen_events']} before {seen_cutoff}\n"
+        f"{action} event_payloads rows: {result['event_payloads']} before {result['payload_before']}\n"
         f"{suffix}"
     )
 

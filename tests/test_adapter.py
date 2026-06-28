@@ -165,6 +165,21 @@ def test_render_event_message_pointer_mode_keeps_payload_out_of_context(tmp_path
     assert "secret-token" not in text
 
 
+def test_render_event_message_uses_raw_pointer_id_even_when_redaction_shaped():
+    pointer_id = "athp_token_shaped_render_id"
+
+    text = render_event_message(
+        {"payload": {"safe": "ok"}},
+        event_type="relay.done",
+        producer_id="relay",
+        summary="done",
+        ingress_policy=SimpleNamespace(mode="pointer"),
+        payload_record=SimpleNamespace(pointer_id=pointer_id, event_id="evt-pointer"),
+    )
+
+    assert f"Payload pointer: {pointer_id}" in text
+
+
 @pytest.mark.asyncio
 async def test_ingress_digest_pointer_stores_after_auth_and_renders_pointer(tmp_path):
     config = PlatformConfig(

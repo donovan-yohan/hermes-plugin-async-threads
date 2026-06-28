@@ -108,21 +108,30 @@ def resolve_ingress_digest_policy(
 ) -> IngressDigestPolicy:
     merged: dict[str, Any] = {}
     source = "off"
-    for name, layer in (
-        ("global", global_policy),
-        ("listener", listener_policy),
-        ("source_binding", source_binding_policy),
+    source_rank = -1
+    disabled_source = "off"
+    disabled_rank = -1
+    for rank, (name, layer) in enumerate(
+        (
+            ("global", global_policy),
+            ("listener", listener_policy),
+            ("source_binding", source_binding_policy),
+        )
     ):
         raw = _canonical_mapping(layer)
         if not raw:
             continue
         if _explicit_disable(raw):
-            merged = {"enabled": False}
-        else:
-            merged.update(raw)
+            disabled_source = name
+            disabled_rank = rank
+            continue
+        merged.update(raw)
         source = name
+        source_rank = rank
+    if disabled_rank > source_rank:
+        return disabled_policy(source=disabled_source)
     if not merged:
-        return disabled_policy(source="off")
+        return disabled_policy(source=disabled_source)
     return normalize_ingress_digest_policy(merged, source=source)
 
 

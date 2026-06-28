@@ -258,6 +258,13 @@ def test_ingress_digest_policy_precedence_and_payload_pointer_storage(tmp_path: 
     assert fetched.event_id == "evt-payload-pointer"
     assert reg.get_event_payload(owner_user_id="u2", pointer_id=record.pointer_id) is None
 
+    redaction_shaped_pointer = "athp_token_shaped_lookup_id"
+    with reg._connect() as conn:
+        conn.execute("update event_payloads set pointer_id = ? where pointer_id = ?", (redaction_shaped_pointer, record.pointer_id))
+    fetched_raw = reg.get_event_payload(owner_user_id="u1", pointer_id=redaction_shaped_pointer)
+    assert fetched_raw is not None
+    assert fetched_raw.pointer_id == redaction_shaped_pointer
+
 
 def test_ingress_digest_higher_precedence_active_overrides_lower_explicit_off():
     listener_policy = resolve_ingress_digest_policy(
@@ -277,6 +284,24 @@ def test_ingress_digest_higher_precedence_active_overrides_lower_explicit_off():
     assert source_binding_policy.mode == "pointer_summary"
     assert source_binding_policy.store_event == "raw_local"
     assert source_binding_policy.source == "source_binding"
+
+    source_binding_disabled = resolve_ingress_digest_policy(
+        global_policy={"enabled": True, "mode": "pointer"},
+        listener_policy={"enabled": True, "mode": "pointer_summary", "store_event": "raw_local"},
+        source_binding_policy={"enabled": False},
+    )
+    assert source_binding_disabled.active is False
+    assert source_binding_disabled.source == "source_binding"
+
+    source_binding_over_listener = resolve_ingress_digest_policy(
+        global_policy={"enabled": True, "mode": "pointer"},
+        listener_policy={"enabled": False},
+        source_binding_policy={"enabled": True, "mode": "pointer_summary", "store_event": "raw_local"},
+    )
+    assert source_binding_over_listener.active is True
+    assert source_binding_over_listener.mode == "pointer_summary"
+    assert source_binding_over_listener.store_event == "raw_local"
+    assert source_binding_over_listener.source == "source_binding"
 
 
 def test_ingress_digest_defaults_off_and_explicit_listener_disable_wins(tmp_path: Path):
