@@ -267,6 +267,31 @@ async def test_source_binding_ingress_digest_overrides_global_off_and_stores_pay
     assert "secret-token" not in json.dumps(record.redacted_payload, sort_keys=True)
 
 
+@pytest.mark.asyncio
+async def test_ingress_digest_off_policy_does_not_store_payload(tmp_path):
+    config = PlatformConfig(
+        enabled=True,
+        extra={
+            "registry_path": str(tmp_path / "ath.sqlite3"),
+            "ingress_digest": {"enabled": False},
+        },
+    )
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", owner_user_id="u1")
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+    body = _event_body(handle, event_id="evt-off-policy", event_type="relay.session.pr_opened", payload={"safe": "ok"})
+
+    result = await adapter._handle_event(FakeRequest(body, handle.secret))
+
+    assert result.status == 202
+    assert registry.get_event_payload(owner_user_id="u1", event_id="evt-off-policy") is None
+    assert len(target.handled) == 1
+    assert "Payload pointer:" not in target.handled[0].text
+
+
 def test_render_event_message_redacts_hostile_payload_before_prompt_text():
     text = render_event_message(
         {

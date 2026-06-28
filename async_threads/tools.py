@@ -35,7 +35,7 @@ _CREATE_SCHEMA = {
             "delivery": {"type": "string", "enum": ["agent_queue", "direct"], "description": "Delivery policy. Default agent_queue."},
             "ack": {"type": "string", "enum": ["none", "brief", "debug"], "description": "Producer acknowledgement mode. Default brief."},
             "target": {"type": "string", "enum": ["current_conversation"], "description": "Only current_conversation is supported."},
-            "reuse": {"type": "boolean", "description": "Reuse an equivalent active listener when one exists. Default true."},
+            "reuse": {"type": "boolean", "description": "Reuse an equivalent active listener, including matching ingress_digest override, when one exists. Default true."},
             "label": {"type": "string", "description": "Optional display label. Defaults to purpose."},
             "max_turns": {"type": "integer", "description": "Agent-queue continuation intent. Default 1; metadata only until Hermes exposes plugin-enforced per-event caps."},
             "max_tool_calls": {"type": "integer", "description": "Agent-queue tool-call cap intent. Default 0."},
