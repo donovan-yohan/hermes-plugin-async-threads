@@ -270,4 +270,3 @@ def _bound_json_mapping(value: Any, *, max_chars: int) -> dict[str, Any]:
     digest = hashlib.sha256(rendered.encode("utf-8", "replace")).hexdigest()[:16]
     preview = redact_secret_text(rendered[: max(0, max_chars - 200)], max_input_chars=max_chars, max_output_chars=max(0, max_chars - 200))
     return {"truncated": True, "chars": len(rendered), "sha256Prefix": digest, "preview": preview}
-
