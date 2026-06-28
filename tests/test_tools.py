@@ -306,6 +306,32 @@ def test_listener_tool_accepts_ingress_digest_and_payload_lookup_is_owner_scoped
     assert denied["error"] == "not_found"
 
 
+def test_tools_report_effective_ingress_digest_inheritance(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    kwargs = _tool_kwargs(registry, tmp_path)
+    kwargs["config"] = PlatformConfig(
+        enabled=True,
+        extra={
+            "registry_path": str(tmp_path / "ath.sqlite3"),
+            "ingress_digest": {"enabled": True, "mode": "pointer_summary", "store_event": "redacted"},
+        },
+    )
+
+    created = _loads(ath_create_listener_tool({"purpose": "watch build", "producer_hint": "demo-ci"}, **kwargs))
+    listener = created["listener"]
+    assert listener["ingressDigest"]["effectiveMode"] == "pointer_summary"
+    assert listener["ingressDigest"]["source"] == "global"
+
+    binding_result = _loads(
+        ath_create_source_binding_tool(
+            {"source": "kanban", "board_ref": "default", "listener_thread_key": listener["threadKey"]},
+            **kwargs,
+        )
+    )
+    assert binding_result["binding"]["ingressDigest"]["effectiveMode"] == "pointer_summary"
+    assert binding_result["binding"]["ingressDigest"]["source"] == "global"
+
+
 def test_create_listener_tool_does_not_reuse_when_continuation_policy_differs(tmp_path):
     registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
     base = {

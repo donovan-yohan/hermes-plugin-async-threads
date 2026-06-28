@@ -587,6 +587,7 @@ class AsyncThreadRegistry:
         owner_user_id: str,
         event_log_before: str,
         seen_before: str,
+        payload_before: str | None = None,
         dry_run: bool = True,
     ) -> dict[str, int | bool | str]:
         """Prune old diagnostic/de-dupe rows for one owner.
@@ -596,7 +597,7 @@ class AsyncThreadRegistry:
         """
         if not owner_user_id:
             return {"dry_run": dry_run, "event_log": 0, "seen_events": 0, "event_payloads": 0, "owner_scoped": False}
-        payload_before = utc_now()
+        payload_cutoff = payload_before or utc_now()
         with self._connect() as conn:
             if not dry_run:
                 conn.execute("BEGIN IMMEDIATE")
@@ -625,13 +626,13 @@ class AsyncThreadRegistry:
             payload_count = int(
                 conn.execute(
                     "select count(*) from event_payloads where owner_user_id = ? and expires_at < ?",
-                    (owner_user_id, payload_before),
+                    (owner_user_id, payload_cutoff),
                 ).fetchone()[0]
             )
             if not dry_run:
                 conn.execute(
                     "delete from event_payloads where owner_user_id = ? and expires_at < ?",
-                    (owner_user_id, payload_before),
+                    (owner_user_id, payload_cutoff),
                 )
                 conn.execute(
                     """
@@ -664,7 +665,7 @@ class AsyncThreadRegistry:
             "event_payloads": payload_count,
             "event_log_before": event_log_before,
             "seen_before": seen_before,
-            "payload_before": payload_before,
+            "payload_before": payload_cutoff,
             "owner_scoped": True,
         }
 

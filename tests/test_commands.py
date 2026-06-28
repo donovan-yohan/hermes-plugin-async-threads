@@ -641,6 +641,8 @@ def test_lifecycle_command_documents_retirement_and_trace(tmp_path):
 
 
 def test_prune_command_dry_run_and_force_are_owner_scoped(tmp_path):
+    from async_threads.ingress_digest import resolve_ingress_digest_policy
+
     registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
     mine = registry.create_handle(
         source={"platform": "discord", "chat_id": "c", "chat_type": "channel", "thread_id": "t"},
@@ -678,6 +680,7 @@ def test_prune_command_dry_run_and_force_are_owner_scoped(tmp_path):
 
     config = PlatformConfig(enabled=True, extra={"event_log_retention_days": 1, "seen_event_retention_days": 1})
     dry = _cmd_prune(registry, ["--dry-run"], config=config, owner_user_id="u1")
+    assert "scope: owner-scoped" in dry
     assert "would prune event_log rows: 1" in dry
     assert "would prune seen_events rows: 1" in dry
     assert "would prune event_payloads rows: 1" in dry

@@ -327,6 +327,22 @@ def test_ingress_digest_defaults_off_and_explicit_listener_disable_wins(tmp_path
     assert disabled.active is False
     assert disabled.source == "listener"
 
+    reenabled = resolve_ingress_digest_policy(
+        global_policy={"enabled": False},
+        listener_policy={"enabled": True, "mode": "pointer_summary", "store_event": "redacted"},
+    )
+    assert reenabled.active is True
+    assert reenabled.mode == "pointer_summary"
+    assert reenabled.source == "listener"
+
+    binding_disabled = resolve_ingress_digest_policy(
+        global_policy={"enabled": True, "mode": "pointer_summary", "store_event": "redacted"},
+        listener_policy={"enabled": True, "mode": "inline_summary", "store_event": "none"},
+        source_binding_policy={"enabled": False},
+    )
+    assert binding_disabled.active is False
+    assert binding_disabled.source == "source_binding"
+
 
 def test_normalize_workflow_event_ignores_non_mapping_payloads():
     assert normalize_workflow_event([], {"event_id": "evt", "event_type": "job.progress", "summary": "ignored"}) is None
