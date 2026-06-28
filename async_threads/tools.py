@@ -350,6 +350,7 @@ def ath_create_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
             ack_mode=spec["ack_mode"],
             continuation_policy=spec["continuation_policy"],
             lifecycle_policy=spec["lifecycle_policy"],
+            ingress_digest_policy=spec["ingress_digest_policy"],
         )
         if existing is not None:
             return _json(
@@ -876,11 +877,13 @@ def _find_equivalent_listener(
     ack_mode: str,
     continuation_policy: Mapping[str, Any],
     lifecycle_policy: Mapping[str, Any],
+    ingress_digest_policy: Mapping[str, Any],
 ) -> AsyncThreadHandle | None:
     expected_continuation = ContinuationPolicy.from_mapping(continuation_policy).to_mapping()
     from .lifecycle import LifecyclePolicy
 
     expected_lifecycle = LifecyclePolicy.from_mapping(lifecycle_policy).to_mapping()
+    expected_ingress_digest = policy_override_mapping(ingress_digest_policy)
     for handle in registry.list_handles(owner_user_id=owner_user_id, include_disabled=False):
         if handle.producer_id != producer_id:
             continue
@@ -893,6 +896,8 @@ def _find_equivalent_listener(
         if handle.continuation_policy.to_mapping() != expected_continuation:
             continue
         if handle.lifecycle_policy.to_mapping() != expected_lifecycle:
+            continue
+        if policy_override_mapping(handle.ingress_digest_policy) != expected_ingress_digest:
             continue
         if _same_origin(handle, origin):
             return handle

@@ -306,6 +306,45 @@ def test_listener_tool_accepts_ingress_digest_and_payload_lookup_is_owner_scoped
     assert denied["error"] == "not_found"
 
 
+def test_create_listener_tool_does_not_reuse_when_ingress_digest_override_differs(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    kwargs = _tool_kwargs(registry, tmp_path)
+    base = {
+        "purpose": "watch this build and report back here",
+        "producer_hint": "demo-ci",
+        "event_kinds": ["finished"],
+    }
+
+    first = _loads(ath_create_listener_tool(base, **kwargs))
+    second = _loads(
+        ath_create_listener_tool(
+            {
+                **base,
+                "ingress_digest": {"enabled": True, "mode": "pointer_summary", "store_event": "redacted"},
+            },
+            **kwargs,
+        )
+    )
+    reused = _loads(
+        ath_create_listener_tool(
+            {
+                **base,
+                "ingress_digest": {"enabled": True, "mode": "pointer_summary", "store_event": "redacted"},
+            },
+            **kwargs,
+        )
+    )
+
+    assert first["action"] == "created"
+    assert first["listener"]["ingressDigest"]["effectiveMode"] == "off"
+    assert second["action"] == "created"
+    assert second["listener"]["threadKey"] != first["listener"]["threadKey"]
+    assert second["listener"]["ingressDigest"]["effectiveMode"] == "pointer_summary"
+    assert reused["action"] == "reused"
+    assert reused["listener"]["threadKey"] == second["listener"]["threadKey"]
+    assert len(registry.list_handles(owner_user_id="user-1")) == 2
+
+
 def test_tools_report_effective_ingress_digest_inheritance(tmp_path):
     registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
     kwargs = _tool_kwargs(registry, tmp_path)
