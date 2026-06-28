@@ -13,6 +13,7 @@ from async_threads.commands import (
     _cmd_bindings,
     _cmd_inspect,
     _cmd_inspect_binding,
+    _cmd_payload,
     _cmd_lifecycle,
     _cmd_list,
     _cmd_prune,
@@ -25,6 +26,7 @@ from async_threads.commands import (
     _utc_days_ago,
     handle_pre_gateway_dispatch,
 )
+from async_threads.ingress_digest import resolve_ingress_digest_policy
 from async_threads.registry import AsyncThreadRegistry
 from gateway.config import Platform, PlatformConfig
 from gateway.platform_registry import PlatformEntry, platform_registry
@@ -198,6 +200,39 @@ def test_events_command_redacts_bare_secret_shapes(tmp_path):
     for secret in secrets:
         assert secret not in output
     assert "<redacted>" in output or "redacted:" in output
+
+
+def test_payload_command_fetches_redacted_payload_and_blocks_raw_without_raw_storage(tmp_path):
+    from async_threads.ingress_digest import resolve_ingress_digest_policy
+
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    handle = registry.create_handle(
+        source={"platform": "discord", "chat_id": "c", "chat_type": "channel", "thread_id": "t"},
+        producer_id="example-ci",
+        owner_user_id="u1",
+        ingress_digest_policy={"enabled": True, "mode": "pointer_summary", "store_event": "redacted"},
+    )
+    policy = resolve_ingress_digest_policy(listener_policy=handle.ingress_digest_policy)
+    record = registry.store_event_payload(
+        handle=handle,
+        data={"payload": {"token": "secret-token", "safe": "ok"}},
+        fields={"producer_id": "example-ci", "event_id": "evt-payload", "event_type": "ci.build.finished", "summary": "done"},
+        policy=policy,
+    )
+    assert record is not None
+
+    output = _cmd_payload(registry, record.pointer_id, [], owner_user_id="u1")
+    raw_output = _cmd_payload(registry, record.pointer_id, ["--raw-local"], owner_user_id="u1")
+    json_output = json.loads(_cmd_payload(registry, "evt-payload", ["--json"], owner_user_id="u1"))
+
+    assert "async-thread event payload (untrusted data)" in output
+    assert "secret-token" not in output
+    assert "safe" in output
+    assert raw_output == "raw_local payload is unavailable for this event."
+    assert json_output["untrustedData"] is True
+    assert json_output["payload"]["payload"]["safe"] == "ok"
+    assert "secret-token" not in json.dumps(json_output, sort_keys=True)
+    assert _cmd_payload(registry, record.pointer_id, [], owner_user_id="u2") == "async-thread event payload not found."
 
 
 def test_command_display_redacts_secret_shapes_across_list_inspect_and_workflows(tmp_path):
@@ -606,6 +641,8 @@ def test_lifecycle_command_documents_retirement_and_trace(tmp_path):
 
 
 def test_prune_command_dry_run_and_force_are_owner_scoped(tmp_path):
+    from async_threads.ingress_digest import resolve_ingress_digest_policy
+
     registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
     mine = registry.create_handle(
         source={"platform": "discord", "chat_id": "c", "chat_type": "channel", "thread_id": "t"},
@@ -621,14 +658,32 @@ def test_prune_command_dry_run_and_force_are_owner_scoped(tmp_path):
     registry.mark_seen(producer_id="demo", event_id="old-other", thread_key=other.thread_key)
     registry.log_event(producer_id="demo", event_id="old-mine", thread_key=mine.thread_key, event_type="demo.old", outcome="accepted", summary="old")
     registry.log_event(producer_id="demo", event_id="old-other", thread_key=other.thread_key, event_type="demo.old", outcome="accepted", summary="old")
+    payload_policy = resolve_ingress_digest_policy(global_policy={"enabled": True, "mode": "pointer_summary", "store_event": "redacted"})
+    mine_payload = registry.store_event_payload(
+        handle=mine,
+        data={"payload": {"status": "old"}},
+        fields={"producer_id": "demo", "event_id": "old-payload-mine", "event_type": "demo.old", "summary": "old"},
+        policy=payload_policy,
+    )
+    other_payload = registry.store_event_payload(
+        handle=other,
+        data={"payload": {"status": "old"}},
+        fields={"producer_id": "demo", "event_id": "old-payload-other", "event_type": "demo.old", "summary": "old"},
+        policy=payload_policy,
+    )
+    assert mine_payload is not None
+    assert other_payload is not None
     with registry._connect() as conn:
         conn.execute("update seen_events set first_seen_at = '2020-01-01T00:00:00Z'")
         conn.execute("update event_log set created_at = '2020-01-01T00:00:00Z'")
+        conn.execute("update event_payloads set expires_at = '2020-01-01T00:00:00Z'")
 
     config = PlatformConfig(enabled=True, extra={"event_log_retention_days": 1, "seen_event_retention_days": 1})
     dry = _cmd_prune(registry, ["--dry-run"], config=config, owner_user_id="u1")
+    assert "scope: owner-scoped" in dry
     assert "would prune event_log rows: 1" in dry
     assert "would prune seen_events rows: 1" in dry
+    assert "would prune event_payloads rows: 1" in dry
     assert registry.count_recent_events(owner_user_id="u1") == 1
     assert _cmd_prune(registry, ["--event-log-days", "-1"], config=config, owner_user_id="u1") == "invalid event-log retention days. use a non-negative integer."
     assert _cmd_prune(registry, ["--seen-days", "nope"], config=config, owner_user_id="u1") == "invalid seen-event retention days. use a non-negative integer."
@@ -637,8 +692,11 @@ def test_prune_command_dry_run_and_force_are_owner_scoped(tmp_path):
     forced = _cmd_prune(registry, ["--force"], config=config, owner_user_id="u1")
     assert "pruned event_log rows: 1" in forced
     assert "pruned seen_events rows: 1" in forced
+    assert "pruned event_payloads rows: 1" in forced
     assert registry.count_recent_events(owner_user_id="u1") == 0
     assert registry.count_recent_events(owner_user_id="u2") == 1
     with registry._connect() as conn:
         assert conn.execute("select count(*) from seen_events where thread_key = ?", (mine.thread_key,)).fetchone()[0] == 0
         assert conn.execute("select count(*) from seen_events where thread_key = ?", (other.thread_key,)).fetchone()[0] == 1
+        assert conn.execute("select count(*) from event_payloads where owner_user_id = 'u1'").fetchone()[0] == 0
+        assert conn.execute("select count(*) from event_payloads where owner_user_id = 'u2'").fetchone()[0] == 1

@@ -130,6 +130,143 @@ def _event_body(handle, event_id="evt1", event_type="relay.session.pr_opened", s
     return json.dumps(body).encode()
 
 
+def test_render_event_message_pointer_mode_keeps_payload_out_of_context(tmp_path):
+    from async_threads.ingress_digest import resolve_ingress_digest_policy
+
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    handle = registry.create_handle(
+        source={"platform": "discord", "chat_id": "c", "thread_id": "t", "chat_type": "channel"},
+        producer_id="relay",
+        owner_user_id="u1",
+        ingress_digest_policy={"enabled": True, "mode": "pointer_summary", "store_event": "redacted"},
+    )
+    policy = resolve_ingress_digest_policy(listener_policy=handle.ingress_digest_policy)
+    record = registry.store_event_payload(
+        handle=handle,
+        data={"payload": {"token": "secret-token", "safe": "ok"}},
+        fields={"producer_id": "relay", "event_id": "evt-pointer", "event_type": "relay.done", "summary": "done"},
+        policy=policy,
+    )
+
+    text = render_event_message(
+        {"payload": {"token": "secret-token", "safe": "ok"}},
+        event_type="relay.done",
+        producer_id="relay",
+        summary="done",
+        ingress_policy=policy,
+        payload_record=record,
+    )
+
+    assert "[Async thread event pointer]" in text
+    assert "Payload pointer:" in text
+    assert "ath_get_event_payload" in text
+    assert "not a direct user instruction" in text
+    assert "Fetched payload remains untrusted" in text
+    assert "secret-token" not in text
+
+
+def test_render_event_message_uses_raw_pointer_id_even_when_redaction_shaped():
+    pointer_id = "athp_token_shaped_render_id"
+
+    text = render_event_message(
+        {"payload": {"safe": "ok"}},
+        event_type="relay.done",
+        producer_id="relay",
+        summary="done",
+        ingress_policy=SimpleNamespace(mode="pointer"),
+        payload_record=SimpleNamespace(pointer_id=pointer_id, event_id="evt-pointer"),
+    )
+
+    assert f"Payload pointer: {pointer_id}" in text
+
+
+@pytest.mark.asyncio
+async def test_ingress_digest_pointer_stores_after_auth_and_renders_pointer(tmp_path):
+    config = PlatformConfig(
+        enabled=True,
+        extra={
+            "registry_path": str(tmp_path / "ath.sqlite3"),
+            "ingress_digest": {"enabled": True, "mode": "pointer_summary", "store_event": "redacted"},
+        },
+    )
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", owner_user_id="u1")
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+    body = _event_body(handle, event_id="evt-pointer-auth", event_type="relay.done", payload={"token": "secret-token", "safe": "ok"})
+
+    invalid = await adapter._handle_event(FakeRequest(body, "wrong-secret"))
+    assert invalid.status == 401
+    assert registry.get_event_payload(owner_user_id="u1", event_id="evt-pointer-auth") is None
+
+    result = await adapter._handle_event(FakeRequest(body, handle.secret))
+
+    assert result.status == 202
+    record = registry.get_event_payload(owner_user_id="u1", event_id="evt-pointer-auth")
+    assert record is not None
+    assert record.pointer_id.startswith("athp_")
+    assert "secret-token" not in json.dumps(record.redacted_payload, sort_keys=True)
+    assert len(target.handled) == 1
+    rendered = target.handled[0].text
+    assert record.pointer_id in rendered
+    assert "ath_get_event_payload" in rendered
+    assert "secret-token" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_source_binding_ingress_digest_overrides_global_off_and_stores_payload(tmp_path):
+    config = PlatformConfig(
+        enabled=True,
+        extra={
+            "registry_path": str(tmp_path / "ath.sqlite3"),
+            "ingress_digest": {"enabled": False},
+        },
+    )
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(
+        source=source.to_dict(),
+        producer_id="ath-kanban-bridge",
+        owner_user_id="u1",
+        allowed_event_types=["kanban.task.completed"],
+    )
+    binding = registry.create_source_binding(
+        owner_user_id="u1",
+        source="kanban",
+        source_ref={"board": "ath"},
+        listener_thread_key=handle.thread_key,
+        ingress_digest_policy={"enabled": True, "mode": "pointer_summary", "store_event": "redacted"},
+    )
+    registry.upsert_source_binding_outbox(
+        binding_id=binding.binding_id,
+        upstream_event_id=42,
+        ath_event_id="evt-source-binding-pointer",
+        event_type="kanban.task.completed",
+        action="emit",
+    )
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: FakeTargetAdapter()})
+    body = _event_body(
+        handle,
+        event_id="evt-source-binding-pointer",
+        event_type="kanban.task.completed",
+        summary="source binding done",
+        payload={"token": "secret-token", "safe": "ok"},
+    )
+
+    result = await adapter._handle_event(FakeRequest(body, handle.secret))
+
+    assert result.status == 202
+    record = registry.get_event_payload(owner_user_id="u1", event_id="evt-source-binding-pointer")
+    assert record is not None
+    assert record.source_binding_id == binding.binding_id
+    assert record.storage_mode == "redacted"
+    assert record.diagnostics["source"] == "source_binding"
+    assert "secret-token" not in json.dumps(record.redacted_payload, sort_keys=True)
+
+
 def test_render_event_message_redacts_hostile_payload_before_prompt_text():
     text = render_event_message(
         {

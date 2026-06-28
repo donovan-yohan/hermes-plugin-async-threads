@@ -15,13 +15,21 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .continuation import ContinuationPolicy
+from .ingress_digest import (
+    IngressDigestPolicy,
+    bounded_event_payload,
+    build_pointer_id,
+    local_digest,
+    payload_expires_at,
+    policy_override_mapping,
+)
 from .lifecycle import LifecyclePolicy
 from .privacy import redact_metadata_text, redact_secret_text, safe_event_id, sanitize_untrusted_value
 from .source_filters import KANBAN_DEFAULT_EVENT_TYPES, source_binding_event_types
 from .workflows import WorkflowPolicy, apply_workflow_transition, normalize_workflow_event
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SOURCE_BINDING_STATUSES = {"active", "paused", "retired"}
 SOURCE_BINDING_DELIVERY_POLICIES = {"agent_queue", "direct"}
@@ -39,6 +47,7 @@ create table if not exists source_bindings(
     transform_json text not null default '{}',
     cursor_json text not null default '{}',
     coalesce_json text not null default '{}',
+    ingress_digest_json text not null default '{}',
     delivery_policy text not null default 'agent_queue',
     status text not null default 'active'
 );
@@ -75,6 +84,34 @@ create index if not exists idx_source_binding_outbox_binding_status
 create index if not exists idx_source_binding_outbox_ath_event
     on source_binding_outbox(ath_event_id);
 """
+EVENT_PAYLOADS_DDL = """
+create table if not exists event_payloads(
+    pointer_id text primary key,
+    created_at text not null,
+    expires_at text not null,
+    owner_user_id text not null,
+    thread_key text not null,
+    producer_id text not null,
+    event_id text not null,
+    event_type text not null,
+    source_binding_id text not null default '',
+    storage_mode text not null default 'redacted',
+    redacted_payload_json text not null default '{}',
+    raw_payload_json text not null default '{}',
+    digest_json text not null default '{}',
+    status text not null default 'stored',
+    diagnostics_json text not null default '{}',
+    unique(owner_user_id, thread_key, producer_id, event_id),
+    foreign key (thread_key) references async_thread_handles(thread_key) on delete cascade
+);
+
+create index if not exists idx_event_payloads_owner_thread
+    on event_payloads(owner_user_id, thread_key, created_at desc);
+create index if not exists idx_event_payloads_event
+    on event_payloads(owner_user_id, event_id);
+create index if not exists idx_event_payloads_expires
+    on event_payloads(expires_at);
+"""
 
 SAFE_DETAIL_KEYS = {
     "ack_mode",
@@ -107,6 +144,11 @@ SAFE_DETAIL_KEYS = {
     "terminal_retired",
     "workflow_id",
     "workflow_stage",
+    "ingress_digest_mode",
+    "ingress_digest_source",
+    "ingress_digest_status",
+    "ingress_digest_storage_mode",
+    "ingress_digest_pointer_id",
     "target_adapter_exists",
     "target_platform",
 }
@@ -138,6 +180,7 @@ class AsyncThreadHandle:
     workflow_policy: WorkflowPolicy = field(default_factory=WorkflowPolicy)
     continuation_policy: ContinuationPolicy = field(default_factory=ContinuationPolicy)
     lifecycle_policy: LifecyclePolicy = field(default_factory=LifecyclePolicy)
+    ingress_digest_policy: dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
 
@@ -196,10 +239,30 @@ class AsyncThreadSourceBinding:
     transform: dict[str, Any]
     cursor: dict[str, Any]
     coalesce: dict[str, Any]
+    ingress_digest_policy: dict[str, Any]
     delivery_policy: str
     status: str
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class AsyncThreadEventPayload:
+    pointer_id: str
+    owner_user_id: str
+    thread_key: str
+    producer_id: str
+    event_id: str
+    event_type: str
+    source_binding_id: str
+    storage_mode: str
+    redacted_payload: dict[str, Any]
+    raw_payload: dict[str, Any]
+    digest: dict[str, Any]
+    status: str
+    diagnostics: dict[str, Any]
+    created_at: str
+    expires_at: str
 
 
 class AsyncThreadRegistry:
@@ -254,7 +317,8 @@ class AsyncThreadRegistry:
                     debounce_seconds integer not null default 0,
                     workflow_policy_json text not null default '{}',
                     continuation_policy_json text not null default '{}',
-                    lifecycle_policy_json text not null default '{}'
+                    lifecycle_policy_json text not null default '{}',
+                    ingress_digest_json text not null default '{}'
                 );
 
                 create index if not exists idx_async_thread_handles_owner
@@ -316,6 +380,7 @@ class AsyncThreadRegistry:
                 """
                 + SOURCE_BINDINGS_DDL
                 + SOURCE_BINDING_OUTBOX_DDL
+                + EVENT_PAYLOADS_DDL
             )
             self._migrate_schema(conn)
             conn.execute(
@@ -344,7 +409,16 @@ class AsyncThreadRegistry:
             conn.execute("alter table async_thread_handles add column continuation_policy_json text not null default '{}'")
         if "lifecycle_policy_json" not in handle_columns:
             conn.execute("alter table async_thread_handles add column lifecycle_policy_json text not null default '{}'")
+        if "ingress_digest_json" not in handle_columns:
+            conn.execute("alter table async_thread_handles add column ingress_digest_json text not null default '{}'")
         conn.executescript(SOURCE_BINDINGS_DDL + SOURCE_BINDING_OUTBOX_DDL)
+        source_binding_columns = {
+            row["name"]
+            for row in conn.execute("pragma table_info(source_bindings)").fetchall()
+        }
+        if "ingress_digest_json" not in source_binding_columns:
+            conn.execute("alter table source_bindings add column ingress_digest_json text not null default '{}'")
+        conn.executescript(EVENT_PAYLOADS_DDL)
 
     def create_handle(
         self,
@@ -362,6 +436,7 @@ class AsyncThreadRegistry:
         workflow_policy: WorkflowPolicy | dict[str, Any] | None = None,
         continuation_policy: ContinuationPolicy | dict[str, Any] | None = None,
         lifecycle_policy: LifecyclePolicy | dict[str, Any] | None = None,
+        ingress_digest_policy: Mapping[str, Any] | None = None,
     ) -> AsyncThreadHandle:
         producer_id = _clean_token(producer_id, default="default")
         policy = policy if policy in {"agent_queue", "direct"} else "agent_queue"
@@ -383,8 +458,8 @@ class AsyncThreadRegistry:
                     thread_key, created_at, updated_at, enabled, label, source_json,
                     session_key, session_id, owner_user_id, producer_id, secret,
                     allowed_event_types_json, policy, ack_mode, debounce_seconds, workflow_policy_json,
-                    continuation_policy_json, lifecycle_policy_json
-                ) values (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    continuation_policy_json, lifecycle_policy_json, ingress_digest_json
+                ) values (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     thread_key,
@@ -404,6 +479,7 @@ class AsyncThreadRegistry:
                     workflow_policy_obj.to_json(),
                     continuation_policy_obj.to_json(),
                     lifecycle_policy_obj.to_json(),
+                    _json_dump(policy_override_mapping(ingress_digest_policy)),
                 ),
             )
         return self.get_handle(thread_key)  # type: ignore[return-value]
@@ -511,6 +587,7 @@ class AsyncThreadRegistry:
         owner_user_id: str,
         event_log_before: str,
         seen_before: str,
+        payload_before: str | None = None,
         dry_run: bool = True,
     ) -> dict[str, int | bool | str]:
         """Prune old diagnostic/de-dupe rows for one owner.
@@ -519,7 +596,8 @@ class AsyncThreadRegistry:
         comparison is intentional for this fixed-width timestamp format.
         """
         if not owner_user_id:
-            return {"dry_run": dry_run, "event_log": 0, "seen_events": 0, "owner_scoped": False}
+            return {"dry_run": dry_run, "event_log": 0, "seen_events": 0, "event_payloads": 0, "owner_scoped": False}
+        payload_cutoff = payload_before or utc_now()
         with self._connect() as conn:
             if not dry_run:
                 conn.execute("BEGIN IMMEDIATE")
@@ -545,7 +623,17 @@ class AsyncThreadRegistry:
                     (owner_user_id, seen_before),
                 ).fetchone()[0]
             )
+            payload_count = int(
+                conn.execute(
+                    "select count(*) from event_payloads where owner_user_id = ? and expires_at < ?",
+                    (owner_user_id, payload_cutoff),
+                ).fetchone()[0]
+            )
             if not dry_run:
+                conn.execute(
+                    "delete from event_payloads where owner_user_id = ? and expires_at < ?",
+                    (owner_user_id, payload_cutoff),
+                )
                 conn.execute(
                     """
                     delete from event_log
@@ -574,8 +662,10 @@ class AsyncThreadRegistry:
             "dry_run": dry_run,
             "event_log": event_count,
             "seen_events": seen_count,
+            "event_payloads": payload_count,
             "event_log_before": event_log_before,
             "seen_before": seen_before,
+            "payload_before": payload_cutoff,
             "owner_scoped": True,
         }
 
@@ -658,6 +748,136 @@ class AsyncThreadRegistry:
                     utc_now(),
                 ),
             )
+
+    def find_source_binding_for_event(
+        self,
+        *,
+        thread_key: str,
+        producer_id: str,
+        event_id: str,
+    ) -> AsyncThreadSourceBinding | None:
+        """Return the trusted source binding that queued this event, if any."""
+
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                select b.*
+                from source_binding_outbox o
+                join source_bindings b on b.binding_id = o.binding_id
+                where o.ath_event_id = ?
+                  and b.listener_thread_key = ?
+                  and b.producer_id = ?
+                  and b.status = 'active'
+                order by o.id desc
+                limit 1
+                """,
+                (safe_event_id(event_id), thread_key, producer_id),
+            ).fetchone()
+        return _row_to_source_binding(row) if row else None
+
+    def store_event_payload(
+        self,
+        *,
+        handle: AsyncThreadHandle,
+        data: Mapping[str, Any],
+        fields: Mapping[str, str],
+        policy: IngressDigestPolicy,
+        source_binding_id: str = "",
+    ) -> AsyncThreadEventPayload | None:
+        if not policy.stores_payload or not handle.owner_user_id:
+            return None
+        pointer_id = build_pointer_id(
+            owner_user_id=handle.owner_user_id,
+            thread_key=handle.thread_key,
+            producer_id=fields["producer_id"],
+            event_id=fields["event_id"],
+        )
+        redacted_payload = bounded_event_payload(data, max_chars=policy.max_input_chars, redacted=True)
+        raw_payload = bounded_event_payload(data, max_chars=policy.max_input_chars, redacted=False) if policy.store_event == "raw_local" else {}
+        digest = local_digest(
+            data,
+            event_type=fields.get("event_type", ""),
+            producer_id=fields.get("producer_id", ""),
+            summary=fields.get("summary", ""),
+            max_chars=policy.max_input_chars,
+        )
+        diagnostics = {"mode": policy.mode, "source": policy.source, "digestStatus": digest.get("status", ""), "modelCalled": False}
+        producer = redact_metadata_text(fields.get("producer_id", ""))
+        event_id = safe_event_id(fields.get("event_id", ""))
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into event_payloads(
+                    pointer_id, created_at, expires_at, owner_user_id, thread_key,
+                    producer_id, event_id, event_type, source_binding_id, storage_mode,
+                    redacted_payload_json, raw_payload_json, digest_json, status, diagnostics_json
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'stored', ?)
+                on conflict(owner_user_id, thread_key, producer_id, event_id) do nothing
+                """,
+                (
+                    pointer_id,
+                    now,
+                    payload_expires_at(policy),
+                    handle.owner_user_id,
+                    handle.thread_key,
+                    producer,
+                    event_id,
+                    redact_metadata_text(fields.get("event_type", "")),
+                    redact_metadata_text(source_binding_id),
+                    policy.store_event,
+                    _json_dump(redacted_payload),
+                    _json_dump(raw_payload),
+                    _json_dump(digest),
+                    _json_dump(diagnostics),
+                ),
+            )
+            row = conn.execute(
+                "select * from event_payloads where owner_user_id = ? and thread_key = ? and producer_id = ? and event_id = ? limit 1",
+                (handle.owner_user_id, handle.thread_key, producer, event_id),
+            ).fetchone()
+        return _row_to_event_payload(row) if row else None
+
+    def get_event_payload(
+        self,
+        *,
+        owner_user_id: str,
+        pointer_id: str = "",
+        event_id: str = "",
+        thread_key: str | None = None,
+    ) -> AsyncThreadEventPayload | None:
+        if not owner_user_id:
+            return None
+        clauses = ["owner_user_id = ?"]
+        params: list[Any] = [owner_user_id]
+        if pointer_id:
+            clauses.append("pointer_id = ?")
+            params.append(_safe_pointer_id(pointer_id))
+        elif event_id:
+            clauses.append("event_id = ?")
+            params.append(safe_event_id(event_id))
+        else:
+            return None
+        if thread_key:
+            clauses.append("thread_key = ?")
+            params.append(thread_key)
+        sql = "select * from event_payloads where " + " and ".join(clauses) + " order by created_at desc limit 1"
+        with self._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return _row_to_event_payload(row) if row else None
+
+    def prune_payloads(self, *, before: str, owner_user_id: str | None = None, dry_run: bool = True) -> int:
+        clauses = ["expires_at < ?"]
+        params: list[Any] = [before]
+        if owner_user_id:
+            clauses.append("owner_user_id = ?")
+            params.append(owner_user_id)
+        where = " and ".join(clauses)
+        with self._connect() as conn:
+            count = int(conn.execute(f"select count(*) from event_payloads where {where}", params).fetchone()[0])
+            if not dry_run:
+                conn.execute(f"delete from event_payloads where {where}", params)
+        return count
 
     def update_workflow_state_from_event(
         self,
@@ -780,6 +1000,7 @@ class AsyncThreadRegistry:
         transform: Mapping[str, Any] | None = None,
         cursor: Mapping[str, Any] | None = None,
         coalesce: Mapping[str, Any] | None = None,
+        ingress_digest_policy: Mapping[str, Any] | None = None,
         delivery_policy: str = "agent_queue",
         status: str = "active",
     ) -> AsyncThreadSourceBinding:
@@ -801,8 +1022,8 @@ class AsyncThreadRegistry:
                 insert into source_bindings(
                     binding_id, created_at, updated_at, owner_user_id, source, source_ref_json,
                     listener_thread_key, producer_id, filter_json, transform_json, cursor_json,
-                    coalesce_json, delivery_policy, status
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    coalesce_json, ingress_digest_json, delivery_policy, status
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     binding_id,
@@ -817,6 +1038,7 @@ class AsyncThreadRegistry:
                     _json_dump(_redacted_mapping(transform)),
                     _json_dump(_redacted_mapping(cursor)),
                     _json_dump(_redacted_mapping(coalesce)),
+                    _json_dump(policy_override_mapping(ingress_digest_policy)),
                     delivery,
                     normalized_status,
                 ),
@@ -1099,6 +1321,7 @@ def _row_to_handle(row: sqlite3.Row) -> AsyncThreadHandle:
         workflow_policy=WorkflowPolicy.from_json(row["workflow_policy_json"] if "workflow_policy_json" in row.keys() else "{}"),
         continuation_policy=ContinuationPolicy.from_json(row["continuation_policy_json"] if "continuation_policy_json" in row.keys() else "{}"),
         lifecycle_policy=LifecyclePolicy.from_json(row["lifecycle_policy_json"] if "lifecycle_policy_json" in row.keys() else "{}"),
+        ingress_digest_policy=_parse_json_object(row["ingress_digest_json"] if "ingress_digest_json" in row.keys() else "{}"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -1116,10 +1339,31 @@ def _row_to_source_binding(row: sqlite3.Row) -> AsyncThreadSourceBinding:
         transform=_parse_json_object(row["transform_json"]),
         cursor=_parse_json_object(row["cursor_json"]),
         coalesce=_parse_json_object(row["coalesce_json"]),
+        ingress_digest_policy=_parse_json_object(row["ingress_digest_json"] if "ingress_digest_json" in row.keys() else "{}"),
         delivery_policy=row["delivery_policy"] or "agent_queue",
         status=row["status"] or "active",
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+    )
+
+
+def _row_to_event_payload(row: sqlite3.Row) -> AsyncThreadEventPayload:
+    return AsyncThreadEventPayload(
+        pointer_id=row["pointer_id"],
+        owner_user_id=row["owner_user_id"],
+        thread_key=row["thread_key"],
+        producer_id=row["producer_id"],
+        event_id=row["event_id"],
+        event_type=row["event_type"],
+        source_binding_id=row["source_binding_id"] or "",
+        storage_mode=row["storage_mode"] or "redacted",
+        redacted_payload=_parse_json_object(row["redacted_payload_json"]),
+        raw_payload=_parse_json_object(row["raw_payload_json"]),
+        digest=_parse_json_object(row["digest_json"]),
+        status=row["status"] or "stored",
+        diagnostics=_parse_json_object(row["diagnostics_json"]),
+        created_at=row["created_at"],
+        expires_at=row["expires_at"],
     )
 
 
@@ -1196,6 +1440,10 @@ def _row_to_workflow_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 def _json_dump(value: Any) -> str:
     return json.dumps(value if isinstance(value, (dict, list)) else {}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _safe_pointer_id(value: Any) -> str:
+    return str(value or "").strip()[:200]
 
 
 def _redacted_mapping(value: Mapping[str, Any] | None) -> dict[str, Any]:

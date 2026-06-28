@@ -26,6 +26,7 @@ commands:
   /ath list
   /ath events [thread_key] [--limit N]
   /ath trace <event_id> [--json]
+  /ath payload <pointer-or-event-id> [--thread <thread_key>] [--raw-local] [--json]
   /ath workflows [thread_key] [--limit N]
   /ath inspect <thread_key>
   /ath emit-command <thread_key> --event event.type [--summary text]
@@ -104,6 +105,8 @@ def _run_command(raw_args: str, *, event: Any, gateway: Any) -> str:
         return _cmd_events(registry, thread_key=thread_key, limit=limit, owner_user_id=owner_user_id)
     if command == "trace" and len(argv) >= 2:
         return _cmd_trace(registry, argv[1], as_json="--json" in argv[2:], owner_user_id=owner_user_id)
+    if command == "payload" and len(argv) >= 2:
+        return _cmd_payload(registry, argv[1], argv[2:], owner_user_id=owner_user_id)
     if command in {"workflows", "runs"}:
         thread_key, limit = _parse_events_args(argv[1:])
         return _cmd_workflows(registry, thread_key=thread_key, limit=limit, owner_user_id=owner_user_id)
@@ -351,6 +354,69 @@ def _trace_interpretation(outcome: str, detail: dict[str, Any]) -> str:
     return "recorded diagnostic event"
 
 
+def _cmd_payload(registry: Any, identifier: str, args: list[str], *, owner_user_id: str) -> str:
+    if not owner_user_id:
+        return "async-thread event payload not found."
+    thread_key = ""
+    raw_local = False
+    as_json = False
+    i = 0
+    while i < len(args):
+        if args[i] == "--thread" and i + 1 < len(args):
+            thread_key = args[i + 1]
+            i += 2
+            continue
+        if args[i] == "--raw-local":
+            raw_local = True
+            i += 1
+            continue
+        if args[i] == "--json":
+            as_json = True
+            i += 1
+            continue
+        return "usage: /ath payload <pointer-or-event-id> [--thread <thread_key>] [--raw-local] [--json]"
+    is_pointer = str(identifier).startswith("athp_")
+    record = registry.get_event_payload(
+        owner_user_id=owner_user_id,
+        pointer_id=identifier if is_pointer else "",
+        event_id="" if is_pointer else identifier,
+        thread_key=thread_key or None,
+    )
+    if record is None:
+        return "async-thread event payload not found."
+    if raw_local:
+        if getattr(record, "storage_mode", "") != "raw_local" or not getattr(record, "raw_payload", {}):
+            return "raw_local payload is unavailable for this event."
+        payload = record.raw_payload
+        redaction = "raw_local"
+    else:
+        payload = record.redacted_payload
+        redaction = "redacted"
+    result = {
+        "pointerId": record.pointer_id,
+        "eventId": record.event_id,
+        "threadKey": record.thread_key,
+        "eventType": record.event_type,
+        "redaction": redaction,
+        "payload": payload,
+        "digest": record.digest,
+        "untrustedData": True,
+        "createdAt": record.created_at,
+        "expiresAt": record.expires_at,
+    }
+    if as_json:
+        return json.dumps(result, sort_keys=True, indent=2, ensure_ascii=False)
+    return (
+        "async-thread event payload (untrusted data)\n"
+        f"pointerId: `{_display_metadata(record.pointer_id, 80)}`\n"
+        f"eventId: `{_short_event_id(record.event_id)}`\n"
+        f"threadKey: `{_display_metadata(record.thread_key, 80)}`\n"
+        f"eventType: `{_display_metadata(record.event_type, 80)}`\n"
+        f"redaction: `{redaction}`\n"
+        f"payload: `{_display_text(json.dumps(payload, sort_keys=True, ensure_ascii=False), 500)}`"
+    )
+
+
 def _cmd_workflows(registry: Any, *, thread_key: str | None, limit: int, owner_user_id: str) -> str:
     if not owner_user_id:
         return "no async-thread workflows for this user."
@@ -558,8 +624,10 @@ def _cmd_prune(registry: Any, args: list[str], *, config: Any, owner_user_id: st
     suffix = "use `--force` to delete rows." if dry_run else "replay protection inside the configured retention window was preserved."
     return (
         f"async-thread prune {'dry-run' if dry_run else 'complete'}\n"
+        "scope: owner-scoped\n"
         f"{action} event_log rows: {result['event_log']} before {event_cutoff}\n"
         f"{action} seen_events rows: {result['seen_events']} before {seen_cutoff}\n"
+        f"{action} event_payloads rows: {result['event_payloads']} before {result['payload_before']}\n"
         f"{suffix}"
     )
 

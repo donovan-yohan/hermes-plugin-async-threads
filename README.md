@@ -138,13 +138,34 @@ X-Hermes-Signature-256: sha256=<hmac_sha256_hex(body, secret)>
 - The MVP stores per-handle HMAC secrets in plugin-local SQLite because the receiver needs to validate inbound events.
 - Listener creation writes a producer-facing `secret.txt` and `contract.json` under the Hermes profile data directory with restrictive permissions where supported; command/tool output shows paths, not the raw secret.
 
+## Ingress digest and event payload pointers
+
+Default behavior stays off: ATH renders the existing bounded/redacted inline event packet, stores no out-of-context payload, and calls no model. Operators can opt in globally with `platforms.async_threads.extra.ingress_digest`, per listener via `ingress_digest`, or per source binding via `ingress_digest`. Effective precedence is source-binding override -> listener override -> global default -> off; missing keys inherit and `enabled: false` or `mode: off` explicitly disables a higher-precedence layer.
+
+```yaml
+platforms:
+  async_threads:
+    extra:
+      ingress_digest:
+        enabled: true
+        mode: pointer_summary   # off | pointer | pointer_summary | inline_summary
+        provider: auto
+        model: auto
+        max_input_chars: 12000
+        max_output_tokens: 256
+        store_event: redacted   # none | redacted | raw_local
+        fetch_default: redacted # raw_local only when store_event=raw_local
+```
+
+Pointer modes render producer id, event type, event id, pointer id, optional local digest/routing facts, and explicit context-safety instructions. The full payload stays out of context and can be fetched with `ath_get_event_payload` or `/ath payload <pointer-or-event-id> [--json]` only by the listener owner. Fetched payload remains untrusted producer data; digest summaries are context hygiene, not sanitization, approval, or a trust boundary. `raw_local` retrieval requires explicit raw-local storage and should be short-lived local debugging only.
+
 See [`docs/SECURITY.md`](docs/SECURITY.md) for more detail.
 
 ## Current implementation features
 
 - plugin-local SQLite async-thread registry;
-- model-facing tools for listener creation, inspection, retirement, tracing, and producer handoff generation;
-- `/ath listen/list/inspect/status/events/trace/workflows/emit-command/rotate-secret/lifecycle/prune/pause/resume/retire/revoke` gateway commands for manual admin/debug;
+- model-facing tools for listener creation, inspection, retirement, tracing, payload pointer lookup, and producer handoff generation;
+- `/ath listen/list/inspect/status/events/trace/payload/workflows/emit-command/rotate-secret/lifecycle/prune/pause/resume/retire/revoke` gateway commands for manual admin/debug;
 - `async_threads` gateway platform receiver;
 - signed `async-thread-event/v1` HTTP endpoint;
 - de-dupe by producer/event id;

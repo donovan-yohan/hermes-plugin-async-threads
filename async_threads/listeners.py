@@ -42,6 +42,7 @@ class ListenRequest:
     workflow_policy: WorkflowPolicy = field(default_factory=WorkflowPolicy)
     continuation_policy: ContinuationPolicy = field(default_factory=ContinuationPolicy)
     lifecycle_policy: LifecyclePolicy = field(default_factory=LifecyclePolicy)
+    ingress_digest_policy: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,7 @@ class ListenResult:
             },
             "continuationPolicy": self.handle.continuation_policy.public_summary(core_enforced=False),
             "lifecyclePolicy": self.handle.lifecycle_policy.public_summary(),
+            "ingressDigestOverride": self.handle.ingress_digest_policy,
             "eventUrl": self.event_url,
             "source": self.source,
             "sessionKeyPresent": bool(self.session_key),
@@ -122,6 +124,7 @@ def create_listener(
     workflow_policy: WorkflowPolicy | Mapping[str, Any] | None = None,
     continuation_policy: ContinuationPolicy | Mapping[str, Any] | None = None,
     lifecycle_policy: LifecyclePolicy | Mapping[str, Any] | None = None,
+    ingress_digest_policy: Mapping[str, Any] | None = None,
     gate_order: Iterable[str] = (),
     gate_mode: str = "serial",
     stale_on_artifact_change: Iterable[str] = (),
@@ -148,6 +151,7 @@ def create_listener(
         workflow_policy=workflow_policy,
         continuation_policy=continuation_policy,
         lifecycle_policy=lifecycle_policy,
+        ingress_digest_policy=ingress_digest_policy,
         gate_order=gate_order,
         gate_mode=gate_mode,
         stale_on_artifact_change=stale_on_artifact_change,
@@ -172,6 +176,7 @@ def create_listener(
         workflow_policy=request.workflow_policy,
         continuation_policy=request.continuation_policy,
         lifecycle_policy=request.lifecycle_policy,
+        ingress_digest_policy=request.ingress_digest_policy,
     )
     return ListenResult(
         handle=handle,
@@ -193,6 +198,7 @@ def normalize_listen_request(
     workflow_policy: WorkflowPolicy | Mapping[str, Any] | None = None,
     continuation_policy: ContinuationPolicy | Mapping[str, Any] | None = None,
     lifecycle_policy: LifecyclePolicy | Mapping[str, Any] | None = None,
+    ingress_digest_policy: Mapping[str, Any] | None = None,
     gate_order: Iterable[str] = (),
     gate_mode: str = "serial",
     stale_on_artifact_change: Iterable[str] = (),
@@ -248,6 +254,7 @@ def normalize_listen_request(
         workflow_policy=workflow_policy_obj,
         continuation_policy=continuation_policy_obj,
         lifecycle_policy=lifecycle_policy_obj,
+        ingress_digest_policy=dict(ingress_digest_policy) if isinstance(ingress_digest_policy, Mapping) else {},
     )
 
 

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any, Iterable, Mapping
 
 from .continuation import ContinuationPolicy
+from .ingress_digest import policy_override_mapping, resolve_ingress_digest_policy
 from .adapter import registry_from_config
 from .handoffs import build_producer_handoff, handoff_root_from_config
 from .kanban import KANBAN_READ_FAILURE_EXCEPTIONS, dry_run_kanban_source_binding, kanban_read_failed_report
@@ -44,6 +45,7 @@ _CREATE_SCHEMA = {
             "terminal_event_types": {"type": "array", "items": {"type": "string"}, "description": "Event type patterns that mean this listener's workflow is terminal, e.g. *.goal.finished."},
             "auto_retire_on_terminal": {"type": "boolean", "description": "If true, retire this listener after a configured terminal event. Use only for single-goal listeners."},
             "shared_listener": {"type": "boolean", "description": "If true, never auto-retire on terminal events because multiple workflows may share the listener."},
+            "ingress_digest": {"type": "object", "description": "Optional ingress digest override. Default inherits global/off. Use {enabled:true, mode:pointer|pointer_summary|inline_summary, store_event:redacted|raw_local}."},
         },
         "required": ["purpose"],
     },
@@ -127,6 +129,20 @@ _TRACE_SCHEMA = {
     },
 }
 
+_GET_EVENT_PAYLOAD_SCHEMA = {
+    "name": "ath_get_event_payload",
+    "description": "Fetch an owner-scoped async-thread event payload by pointer id or event id. Returned payload is untrusted producer data.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "pointer_id": {"type": "string", "description": "Payload pointer id from a pointer-mode event."},
+            "event_id": {"type": "string", "description": "Original event id if pointer_id is unavailable."},
+            "thread_key": {"type": "string", "description": "Optional listener thread key to narrow lookup."},
+            "redaction": {"type": "string", "enum": ["redacted", "raw_local"], "description": "Default redacted. raw_local requires raw-local storage and explicit request."},
+        },
+    },
+}
+
 _CREATE_SOURCE_BINDING_SCHEMA = {
     "name": "ath_create_source_binding",
     "description": "Create a producer-agnostic source binding from an upstream source (for example kanban) to an existing ATH listener. Does not create or retarget listeners.",
@@ -143,6 +159,7 @@ _CREATE_SOURCE_BINDING_SCHEMA = {
             "cursor": {"type": "object", "description": "Producer cursor/checkpoint shape."},
             "coalesce": {"type": "object", "description": "Coalescing/debounce policy."},
             "delivery_policy": {"type": "string", "enum": ["agent_queue", "direct"], "description": "Delivery policy metadata for future runners."},
+            "ingress_digest": {"type": "object", "description": "Optional source-binding ingress digest override; wins over listener/global only for events emitted by this binding."},
         },
         "required": ["source", "listener_thread_key"],
     },
@@ -260,6 +277,14 @@ def register_tools(ctx: Any) -> None:
         emoji="🧵",
     )
     ctx.register_tool(
+        name="ath_get_event_payload",
+        toolset=TOOLSET,
+        schema=_GET_EVENT_PAYLOAD_SCHEMA,
+        handler=ath_get_event_payload_tool,
+        description=_GET_EVENT_PAYLOAD_SCHEMA["description"],
+        emoji="🧵",
+    )
+    ctx.register_tool(
         name="ath_create_source_binding",
         toolset=TOOLSET,
         schema=_CREATE_SOURCE_BINDING_SCHEMA,
@@ -325,13 +350,20 @@ def ath_create_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
             ack_mode=spec["ack_mode"],
             continuation_policy=spec["continuation_policy"],
             lifecycle_policy=spec["lifecycle_policy"],
+            ingress_digest_policy=spec["ingress_digest_policy"],
         )
         if existing is not None:
             return _json(
                 {
                     "ok": True,
                     "action": "reused",
-                    "listener": _handle_summary(existing, event_url=_event_url(config), secret_root=secret_root_from_config(config), ensure_secret_ref=True),
+                    "listener": _handle_summary(
+                        existing,
+                        event_url=_event_url(config),
+                        secret_root=secret_root_from_config(config),
+                        ensure_secret_ref=True,
+                        global_policy=_global_ingress_digest_policy(config),
+                    ),
                     "secret": _secret_reference(existing, event_url=_event_url(config), config=config),
                 }
             )
@@ -351,6 +383,7 @@ def ath_create_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
             event_url=_event_url(config),
             continuation_policy=spec["continuation_policy"],
             lifecycle_policy=spec["lifecycle_policy"],
+            ingress_digest_policy=spec["ingress_digest_policy"],
         )
     except ListenValidationError as exc:
         return _json(_error("invalid_request", str(exc)))
@@ -359,7 +392,13 @@ def ath_create_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
         {
             "ok": True,
             "action": "created",
-            "listener": _handle_summary(result.handle, event_url=result.event_url, secret_root=secret_root_from_config(config), ensure_secret_ref=True),
+            "listener": _handle_summary(
+                result.handle,
+                event_url=result.event_url,
+                secret_root=secret_root_from_config(config),
+                ensure_secret_ref=True,
+                global_policy=_global_ingress_digest_policy(config),
+            ),
             "secret": _secret_reference(result.handle, event_url=result.event_url, config=config),
         }
     )
@@ -389,6 +428,7 @@ def ath_list_listeners_tool(args: dict[str, Any], **kwargs: Any) -> str:
                     secret_root=secret_root_from_config(config),
                     ensure_secret_ref=False,
                     terminal_event=terminal_by_thread.get(handle.thread_key),
+                    global_policy=_global_ingress_digest_policy(config),
                 )
                 for handle in listeners
             ],
@@ -406,7 +446,19 @@ def ath_get_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
     if handle is None:
         return _json(_error("not_found", "async-thread listener not found"))
     ensure_secret_ref = bool(handle.enabled)
-    return _json({"ok": True, "listener": _handle_summary_with_terminal(registry, handle, event_url=_event_url(config), secret_root=secret_root_from_config(config), ensure_secret_ref=ensure_secret_ref)})
+    return _json(
+        {
+            "ok": True,
+            "listener": _handle_summary_with_terminal(
+                registry,
+                handle,
+                event_url=_event_url(config),
+                secret_root=secret_root_from_config(config),
+                ensure_secret_ref=ensure_secret_ref,
+                global_policy=_global_ingress_digest_policy(config),
+            ),
+        }
+    )
 
 
 def ath_retire_listener_tool(args: dict[str, Any], **kwargs: Any) -> str:
@@ -442,7 +494,13 @@ def ath_rotate_listener_secret_tool(args: dict[str, Any], **kwargs: Any) -> str:
         {
             "ok": True,
             "action": "rotated",
-            "listener": _handle_summary(rotated, event_url=event_url, secret_root=secret_root_from_config(config), ensure_secret_ref=True),
+            "listener": _handle_summary(
+                rotated,
+                event_url=event_url,
+                secret_root=secret_root_from_config(config),
+                ensure_secret_ref=True,
+                global_policy=_global_ingress_digest_policy(config),
+            ),
             "secret": _secret_reference(rotated, event_url=event_url, config=config),
         }
     )
@@ -507,8 +565,36 @@ def ath_trace_event_tool(args: dict[str, Any], **kwargs: Any) -> str:
     return _json({"ok": True, "events": [_event_summary(event) for event in events], "count": len(events)})
 
 
-def ath_create_source_binding_tool(args: dict[str, Any], **kwargs: Any) -> str:
+def ath_get_event_payload_tool(args: dict[str, Any], **kwargs: Any) -> str:
     registry, _config = _registry_and_config(kwargs)
+    origin = _resolve_origin(kwargs)
+    if not origin.ok:
+        return _json(origin.public_error())
+    if not origin.owner_user_id:
+        return _json(_error("owner_unavailable", "current gateway user is unavailable"))
+    pointer_id = str(args.get("pointer_id") or "").strip()
+    event_id = str(args.get("event_id") or "").strip()
+    if not pointer_id and not event_id:
+        return _json(_error("invalid_request", "pointer_id or event_id is required"))
+    thread_key = str(args.get("thread_key") or "").strip() or None
+    if thread_key and _owned_handle(registry, thread_key, origin) is None:
+        return _json(_error("not_found", "async-thread listener not found"))
+    record = registry.get_event_payload(owner_user_id=origin.owner_user_id, pointer_id=pointer_id, event_id=event_id, thread_key=thread_key)
+    if record is None:
+        return _json(_error("not_found", "async-thread event payload not found"))
+    redaction = str(args.get("redaction") or "redacted").strip().lower().replace("-", "_")
+    if redaction == "raw_local":
+        if record.storage_mode != "raw_local" or not record.raw_payload:
+            return _json(_error("raw_local_unavailable", "raw_local payload was not stored for this event"))
+        payload = record.raw_payload
+    else:
+        payload = record.redacted_payload
+        redaction = "redacted"
+    return _json({"ok": True, "eventPayload": _payload_record_summary(record, payload=payload, redaction=redaction)})
+
+
+def ath_create_source_binding_tool(args: dict[str, Any], **kwargs: Any) -> str:
+    registry, config = _registry_and_config(kwargs)
     origin = _resolve_origin(kwargs)
     if not origin.ok:
         return _json(origin.public_error())
@@ -519,11 +605,11 @@ def ath_create_source_binding_tool(args: dict[str, Any], **kwargs: Any) -> str:
         binding = registry.create_source_binding(owner_user_id=origin.owner_user_id, **spec)
     except ValueError as exc:
         return _json(_error("invalid_request", str(exc)))
-    return _json({"ok": True, "action": "created", "binding": _source_binding_summary(registry, binding)})
+    return _json({"ok": True, "action": "created", "binding": _source_binding_summary(registry, binding, global_policy=_global_ingress_digest_policy(config))})
 
 
 def ath_list_source_bindings_tool(args: dict[str, Any], **kwargs: Any) -> str:
-    registry, _config = _registry_and_config(kwargs)
+    registry, config = _registry_and_config(kwargs)
     origin = _resolve_origin(kwargs)
     if not origin.ok:
         return _json(origin.public_error())
@@ -535,11 +621,12 @@ def ath_list_source_bindings_tool(args: dict[str, Any], **kwargs: Any) -> str:
         include_retired=bool(args.get("include_retired", False)),
         limit=_bounded_int(args.get("limit"), default=50, minimum=1, maximum=100),
     )
-    return _json({"ok": True, "bindings": [_source_binding_summary(registry, binding) for binding in bindings], "count": len(bindings)})
+    global_ingress_digest_policy = _global_ingress_digest_policy(config)
+    return _json({"ok": True, "bindings": [_source_binding_summary(registry, binding, global_policy=global_ingress_digest_policy) for binding in bindings], "count": len(bindings)})
 
 
 def ath_get_source_binding_tool(args: dict[str, Any], **kwargs: Any) -> str:
-    registry, _config = _registry_and_config(kwargs)
+    registry, config = _registry_and_config(kwargs)
     origin = _resolve_origin(kwargs)
     if not origin.ok:
         return _json(origin.public_error())
@@ -548,11 +635,11 @@ def ath_get_source_binding_tool(args: dict[str, Any], **kwargs: Any) -> str:
     binding = registry.get_source_binding(binding_id=str(args.get("binding_id") or ""), owner_user_id=origin.owner_user_id)
     if binding is None:
         return _json(_error("not_found", "source binding not found"))
-    return _json({"ok": True, "binding": _source_binding_summary(registry, binding, include_config=True)})
+    return _json({"ok": True, "binding": _source_binding_summary(registry, binding, include_config=True, global_policy=_global_ingress_digest_policy(config))})
 
 
 def ath_set_source_binding_status_tool(args: dict[str, Any], **kwargs: Any) -> str:
-    registry, _config = _registry_and_config(kwargs)
+    registry, config = _registry_and_config(kwargs)
     origin = _resolve_origin(kwargs)
     if not origin.ok:
         return _json(origin.public_error())
@@ -566,7 +653,13 @@ def ath_set_source_binding_status_tool(args: dict[str, Any], **kwargs: Any) -> s
     if not changed:
         return _json(_error("not_found", "source binding not found"))
     binding = registry.get_source_binding(binding_id=binding_id, owner_user_id=origin.owner_user_id)
-    return _json({"ok": True, "action": status, "binding": _source_binding_summary(registry, binding) if binding else {"bindingId": binding_id, "status": status}})
+    return _json(
+        {
+            "ok": True,
+            "action": status,
+            "binding": _source_binding_summary(registry, binding, global_policy=_global_ingress_digest_policy(config)) if binding else {"bindingId": binding_id, "status": status},
+        }
+    )
 
 
 def ath_dry_run_source_binding_tool(args: dict[str, Any], **kwargs: Any) -> str:
@@ -682,6 +775,7 @@ def _listener_spec(args: Mapping[str, Any]) -> dict[str, Any]:
         "ack_mode": ack_mode,
         "continuation_policy": continuation_policy,
         "lifecycle_policy": lifecycle_policy,
+        "ingress_digest_policy": policy_override_mapping(args.get("ingress_digest")),
     }
 
 
@@ -710,11 +804,20 @@ def _source_binding_spec(args: Mapping[str, Any]) -> dict[str, Any]:
         "transform": _mapping_arg(args.get("transform")),
         "cursor": _mapping_arg(args.get("cursor")),
         "coalesce": _mapping_arg(args.get("coalesce")),
+        "ingress_digest_policy": policy_override_mapping(args.get("ingress_digest")),
         "delivery_policy": delivery_policy,
     }
 
 
-def _source_binding_summary(registry: AsyncThreadRegistry, binding: Any, *, include_config: bool = False) -> dict[str, Any]:
+def _source_binding_summary(
+    registry: AsyncThreadRegistry,
+    binding: Any,
+    *,
+    include_config: bool = False,
+    global_policy: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    listener = registry.get_handle(binding.listener_thread_key)
+    listener_policy = listener.ingress_digest_policy if listener is not None else None
     payload = {
         "bindingId": binding.binding_id,
         "source": redact_metadata_text(binding.source),
@@ -727,6 +830,11 @@ def _source_binding_summary(registry: AsyncThreadRegistry, binding: Any, *, incl
         "createdAt": binding.created_at,
         "updatedAt": binding.updated_at,
         "compatibility": registry.source_binding_compatibility(binding),
+        "ingressDigest": resolve_ingress_digest_policy(
+            global_policy=global_policy,
+            listener_policy=listener_policy,
+            source_binding_policy=binding.ingress_digest_policy,
+        ).public_summary(),
     }
     if include_config:
         payload.update(
@@ -769,11 +877,13 @@ def _find_equivalent_listener(
     ack_mode: str,
     continuation_policy: Mapping[str, Any],
     lifecycle_policy: Mapping[str, Any],
+    ingress_digest_policy: Mapping[str, Any],
 ) -> AsyncThreadHandle | None:
     expected_continuation = ContinuationPolicy.from_mapping(continuation_policy).to_mapping()
     from .lifecycle import LifecyclePolicy
 
     expected_lifecycle = LifecyclePolicy.from_mapping(lifecycle_policy).to_mapping()
+    expected_ingress_digest = policy_override_mapping(ingress_digest_policy)
     for handle in registry.list_handles(owner_user_id=owner_user_id, include_disabled=False):
         if handle.producer_id != producer_id:
             continue
@@ -786,6 +896,8 @@ def _find_equivalent_listener(
         if handle.continuation_policy.to_mapping() != expected_continuation:
             continue
         if handle.lifecycle_policy.to_mapping() != expected_lifecycle:
+            continue
+        if policy_override_mapping(handle.ingress_digest_policy) != expected_ingress_digest:
             continue
         if _same_origin(handle, origin):
             return handle
@@ -820,8 +932,9 @@ def _handle_summary_with_terminal(
     secret_root: Any | None = None,
     ensure_secret_ref: bool = False,
     terminal_event: Any | None = None,
+    global_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    summary = _handle_summary(handle, event_url=event_url, secret_root=secret_root, ensure_secret_ref=ensure_secret_ref)
+    summary = _handle_summary(handle, event_url=event_url, secret_root=secret_root, ensure_secret_ref=ensure_secret_ref, global_policy=global_policy)
     terminal = terminal_event if terminal_event is not None else registry.latest_terminal_event(thread_key=handle.thread_key)
     if terminal is not None:
         summary["terminalState"] = {
@@ -840,6 +953,7 @@ def _handle_summary(
     event_url: str = "",
     secret_root: Any | None = None,
     ensure_secret_ref: bool = False,
+    global_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     summary = {
         "threadKey": handle.thread_key,
@@ -862,6 +976,7 @@ def _handle_summary(
         "secretAvailable": bool(handle.secret),
         "continuationPolicy": handle.continuation_policy.public_summary(core_enforced=False),
         "lifecyclePolicy": handle.lifecycle_policy.public_summary(),
+        "ingressDigest": resolve_ingress_digest_policy(global_policy=global_policy, listener_policy=handle.ingress_digest_policy).public_summary(),
     }
     summary["secretRef"] = describe_secret_artifact(
         handle,
@@ -882,6 +997,23 @@ def _event_summary(event: Any) -> dict[str, Any]:
         "summary": redact_metadata_text(getattr(event, "summary", "")),
         "detail": sanitize_event_detail(getattr(event, "detail", {}) or {}),
         "createdAt": getattr(event, "created_at", ""),
+    }
+
+
+def _payload_record_summary(record: Any, *, payload: Mapping[str, Any], redaction: str) -> dict[str, Any]:
+    return {
+        "pointerId": getattr(record, "pointer_id", ""),
+        "eventId": safe_event_id(getattr(record, "event_id", "")),
+        "threadKey": getattr(record, "thread_key", ""),
+        "producerId": redact_metadata_text(getattr(record, "producer_id", "")),
+        "eventType": redact_metadata_text(getattr(record, "event_type", "")),
+        "storageMode": getattr(record, "storage_mode", ""),
+        "redaction": redaction,
+        "payload": _public_value(payload),
+        "digest": _public_value(getattr(record, "digest", {}) or {}),
+        "untrustedData": True,
+        "createdAt": getattr(record, "created_at", ""),
+        "expiresAt": getattr(record, "expires_at", ""),
     }
 
 
@@ -907,6 +1039,12 @@ def _event_url(config: Any) -> str:
     if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
         return f"{scheme}://{host}/async-threads/v1/events"
     return f"{scheme}://{host}:{port}/async-threads/v1/events"
+
+
+def _global_ingress_digest_policy(config: Any) -> Mapping[str, Any]:
+    extra = getattr(config, "extra", {}) or {}
+    policy = extra.get("ingress_digest") if isinstance(extra, Mapping) else None
+    return policy if isinstance(policy, Mapping) else {}
 
 
 def _clean_token(value: str, *, default: str) -> str:

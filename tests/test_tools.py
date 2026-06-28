@@ -19,6 +19,7 @@ from async_threads.tools import (
     ath_create_listener_tool,
     ath_create_source_binding_tool,
     ath_generate_producer_handoff_tool,
+    ath_get_event_payload_tool,
     ath_get_listener_tool,
     ath_get_source_binding_tool,
     ath_dry_run_source_binding_tool,
@@ -176,6 +177,7 @@ def test_plugin_registers_model_facing_tools():
         "ath_rotate_listener_secret",
         "ath_generate_producer_handoff",
         "ath_trace_event",
+        "ath_get_event_payload",
         "ath_create_source_binding",
         "ath_list_source_bindings",
         "ath_get_source_binding",
@@ -254,6 +256,119 @@ def test_create_listener_tool_records_explicit_continuation_policy(tmp_path):
     assert handle.continuation_policy.max_turns == 2
     assert handle.continuation_policy.max_tool_calls == 3
     assert handle.continuation_policy.timeout_seconds == 90
+
+
+def test_listener_tool_accepts_ingress_digest_and_payload_lookup_is_owner_scoped(tmp_path):
+    from async_threads.ingress_digest import resolve_ingress_digest_policy
+
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    kwargs = _tool_kwargs(registry, tmp_path)
+    created = _loads(
+        ath_create_listener_tool(
+            {
+                "purpose": "watch this build and report back here",
+                "producer_hint": "demo-ci",
+                "ingress_digest": {"enabled": True, "mode": "pointer_summary", "store_event": "redacted"},
+            },
+            **kwargs,
+        )
+    )
+    listener = created["listener"]
+    assert listener["ingressDigest"] == {
+        "effectiveMode": "pointer_summary",
+        "model": "auto",
+        "provider": "auto",
+        "source": "listener",
+        "storeEvent": "redacted",
+    }
+    handle = registry.get_handle(listener["threadKey"])
+    assert handle is not None
+    policy = resolve_ingress_digest_policy(listener_policy=handle.ingress_digest_policy)
+    record = registry.store_event_payload(
+        handle=handle,
+        data={"payload": {"token": "secret-token", "safe": "ok"}},
+        fields={"producer_id": handle.producer_id, "event_id": "evt-tool-payload", "event_type": "demo-ci.done", "summary": "done"},
+        policy=policy,
+    )
+    assert record is not None
+
+    fetched = _loads(ath_get_event_payload_tool({"pointer_id": record.pointer_id}, **kwargs))
+    assert fetched["ok"] is True
+    assert fetched["eventPayload"]["pointerId"] == record.pointer_id
+    assert fetched["eventPayload"]["redaction"] == "redacted"
+    assert fetched["eventPayload"]["untrustedData"] is True
+    assert "secret-token" not in json.dumps(fetched, sort_keys=True)
+    assert fetched["eventPayload"]["payload"]["payload"]["safe"] == "ok"
+
+    other_kwargs = _tool_kwargs(registry, tmp_path, entry=_entry(source=_source(user_id="user-2"), session_id="sid-2", session_key="key-2"))
+    denied = _loads(ath_get_event_payload_tool({"pointer_id": record.pointer_id}, **other_kwargs))
+    assert denied["ok"] is False
+    assert denied["error"] == "not_found"
+
+
+def test_create_listener_tool_does_not_reuse_when_ingress_digest_override_differs(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    kwargs = _tool_kwargs(registry, tmp_path)
+    base = {
+        "purpose": "watch this build and report back here",
+        "producer_hint": "demo-ci",
+        "event_kinds": ["finished"],
+    }
+
+    first = _loads(ath_create_listener_tool(base, **kwargs))
+    second = _loads(
+        ath_create_listener_tool(
+            {
+                **base,
+                "ingress_digest": {"enabled": True, "mode": "pointer_summary", "store_event": "redacted"},
+            },
+            **kwargs,
+        )
+    )
+    reused = _loads(
+        ath_create_listener_tool(
+            {
+                **base,
+                "ingress_digest": {"enabled": True, "mode": "pointer_summary", "store_event": "redacted"},
+            },
+            **kwargs,
+        )
+    )
+
+    assert first["action"] == "created"
+    assert first["listener"]["ingressDigest"]["effectiveMode"] == "off"
+    assert second["action"] == "created"
+    assert second["listener"]["threadKey"] != first["listener"]["threadKey"]
+    assert second["listener"]["ingressDigest"]["effectiveMode"] == "pointer_summary"
+    assert reused["action"] == "reused"
+    assert reused["listener"]["threadKey"] == second["listener"]["threadKey"]
+    assert len(registry.list_handles(owner_user_id="user-1")) == 2
+
+
+def test_tools_report_effective_ingress_digest_inheritance(tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    kwargs = _tool_kwargs(registry, tmp_path)
+    kwargs["config"] = PlatformConfig(
+        enabled=True,
+        extra={
+            "registry_path": str(tmp_path / "ath.sqlite3"),
+            "ingress_digest": {"enabled": True, "mode": "pointer_summary", "store_event": "redacted"},
+        },
+    )
+
+    created = _loads(ath_create_listener_tool({"purpose": "watch build", "producer_hint": "demo-ci"}, **kwargs))
+    listener = created["listener"]
+    assert listener["ingressDigest"]["effectiveMode"] == "pointer_summary"
+    assert listener["ingressDigest"]["source"] == "global"
+
+    binding_result = _loads(
+        ath_create_source_binding_tool(
+            {"source": "kanban", "board_ref": "default", "listener_thread_key": listener["threadKey"]},
+            **kwargs,
+        )
+    )
+    assert binding_result["binding"]["ingressDigest"]["effectiveMode"] == "pointer_summary"
+    assert binding_result["binding"]["ingressDigest"]["source"] == "global"
 
 
 def test_create_listener_tool_does_not_reuse_when_continuation_policy_differs(tmp_path):
@@ -767,6 +882,7 @@ def test_source_binding_tools_create_list_inspect_and_retire_without_listener_si
                 "listener_thread_key": listener.thread_key,
                 "event_filter": {"eventTypes": ["kanban.task.blocked", "kanban.task.completed"]},
                 "cursor": {"lastEventId": 10, "token": "abc123secret"},
+                "ingress_digest": {"enabled": True, "mode": "pointer", "store_event": "redacted"},
             },
             **_tool_kwargs(registry, tmp_path),
         )
@@ -776,6 +892,8 @@ def test_source_binding_tools_create_list_inspect_and_retire_without_listener_si
     binding = created["binding"]
     assert binding["source"] == "kanban"
     assert binding["sourceRef"] == {"board": "default"}
+    assert binding["ingressDigest"]["effectiveMode"] == "pointer"
+    assert binding["ingressDigest"]["source"] == "source_binding"
     assert binding["compatibility"]["valid"] is True
     assert listener.secret not in json.dumps(created, sort_keys=True)
     assert "abc123secret" not in json.dumps(created, sort_keys=True)

@@ -8,6 +8,7 @@ import hashlib
 from pathlib import Path
 from typing import Any, Mapping
 
+from .ingress_digest import resolve_ingress_digest_policy
 from .lifecycle import is_terminal_event, terminal_action
 from .privacy import redact_metadata_text, safe_event_id
 from .registry import AsyncThreadHandle, AsyncThreadRegistry, safe_session_key_hash
@@ -175,6 +176,8 @@ def _build_adapter_base():
             self._host = str((config.extra or {}).get("host", "127.0.0.1"))
             self._port = int((config.extra or {}).get("port", 8765))
             self._max_body_bytes = int((config.extra or {}).get("max_body_bytes", 64 * 1024))
+            configured_ingress_digest = (config.extra or {}).get("ingress_digest")
+            self._ingress_digest_config = configured_ingress_digest if isinstance(configured_ingress_digest, Mapping) else {}
             self._replay_window_seconds = int(
                 (config.extra or {}).get("replay_window_seconds", DEFAULT_REPLAY_WINDOW_SECONDS)
             )
@@ -365,10 +368,12 @@ def _build_adapter_base():
                     )
                     return web.json_response({"status": "duplicate", "threadKey": handle.thread_key})
 
+                source_binding, ingress_policy, payload_record = self._resolve_ingress_payload(handle, data, fields)
+
                 if self._has_pending_coalesced(handle) and self._is_priority_event(data, fields):
                     await self._flush_coalesced(handle.thread_key, reason="priority_flush")
                 elif self._should_coalesce(handle, data, fields):
-                    detail = self._queue_coalesced_event(handle, data, fields)
+                    detail = self._queue_coalesced_event(handle, data, fields, source_binding=source_binding)
                     self._registry.log_event(
                         producer_id=fields["producer_id"],
                         event_id=fields["event_id"],
@@ -381,7 +386,7 @@ def _build_adapter_base():
                     return web.json_response({"status": "queued", "threadKey": handle.thread_key}, status=202)
 
                 try:
-                    outcome, detail = await self.dispatch_event(handle, data, fields)
+                    outcome, detail = await self.dispatch_event(handle, data, fields, ingress_policy=ingress_policy, payload_record=payload_record)
                 except Exception as exc:
                     self._registry.forget_seen(
                         producer_id=fields["producer_id"],
@@ -430,6 +435,9 @@ def _build_adapter_base():
             handle: AsyncThreadHandle,
             data: Mapping[str, Any],
             fields: Mapping[str, str],
+            *,
+            ingress_policy: Any | None = None,
+            payload_record: Any | None = None,
         ) -> tuple[str, dict[str, Any]]:
             source = SessionSource.from_dict(handle.source)
             detail: dict[str, Any] = {
@@ -454,7 +462,16 @@ def _build_adapter_base():
                 event_type=fields["event_type"],
                 producer_id=fields["producer_id"],
                 summary=fields.get("summary", ""),
+                ingress_policy=ingress_policy,
+                payload_record=payload_record,
             )
+            if ingress_policy is not None:
+                detail["ingress_digest_mode"] = getattr(ingress_policy, "mode", "off")
+                detail["ingress_digest_source"] = getattr(ingress_policy, "source", "off")
+            if payload_record is not None:
+                detail["ingress_digest_status"] = getattr(payload_record, "status", "stored")
+                detail["ingress_digest_storage_mode"] = getattr(payload_record, "storage_mode", "")
+                detail["ingress_digest_pointer_id"] = getattr(payload_record, "pointer_id", "")
             if handle.policy == "direct":
                 metadata = send_metadata_for_source(source)
                 try:
@@ -532,6 +549,34 @@ def _build_adapter_base():
             detail["handle_message_returned"] = True
             return "agent_started", detail
 
+        def _resolve_ingress_payload(
+            self,
+            handle: AsyncThreadHandle,
+            data: Mapping[str, Any],
+            fields: Mapping[str, str],
+            *,
+            source_binding: Any | None = None,
+        ) -> tuple[Any | None, Any, Any | None]:
+            if source_binding is None:
+                source_binding = self._registry.find_source_binding_for_event(
+                    thread_key=handle.thread_key,
+                    producer_id=fields["producer_id"],
+                    event_id=fields["event_id"],
+                )
+            ingress_policy = resolve_ingress_digest_policy(
+                global_policy=self._ingress_digest_config,
+                listener_policy=handle.ingress_digest_policy,
+                source_binding_policy=source_binding.ingress_digest_policy if source_binding is not None else None,
+            )
+            payload_record = self._registry.store_event_payload(
+                handle=handle,
+                data=data,
+                fields=fields,
+                policy=ingress_policy,
+                source_binding_id=source_binding.binding_id if source_binding is not None else "",
+            )
+            return source_binding, ingress_policy, payload_record
+
         def _record_workflow_state(
             self,
             handle: AsyncThreadHandle,
@@ -600,9 +645,11 @@ def _build_adapter_base():
             handle: AsyncThreadHandle,
             data: Mapping[str, Any],
             fields: Mapping[str, str],
+            *,
+            source_binding: Any | None = None,
         ) -> dict[str, Any]:
             bucket = self._coalesced_events.setdefault(handle.thread_key, [])
-            bucket.append({"handle": handle, "data": dict(data), "fields": dict(fields)})
+            bucket.append({"handle": handle, "data": dict(data), "fields": dict(fields), "source_binding": source_binding})
             task = self._coalesce_tasks.get(handle.thread_key)
             if task is None or task.done():
                 self._coalesce_tasks[handle.thread_key] = asyncio.create_task(
@@ -635,9 +682,15 @@ def _build_adapter_base():
             self._coalesced_inflight[thread_key] = pending
             handle = pending[-1]["handle"]
             data, fields = self._coalesced_digest(pending, reason=reason)
+            _source_binding, ingress_policy, payload_record = self._resolve_ingress_payload(
+                handle,
+                data,
+                fields,
+                source_binding=pending[-1].get("source_binding"),
+            )
             try:
                 try:
-                    outcome, detail = await self.dispatch_event(handle, data, fields)
+                    outcome, detail = await self.dispatch_event(handle, data, fields, ingress_policy=ingress_policy, payload_record=payload_record)
                 except Exception as exc:  # noqa: BLE001
                     detail = dict(getattr(exc, "detail", {}) or {})
                     detail.update(
