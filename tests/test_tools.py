@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 from jsonschema import validate
 
+from async_threads import origin as origin_module
 from async_threads.adapter import AsyncThreadsAdapter
 from async_threads.plugin import register
 from async_threads.registry import AsyncThreadRegistry
@@ -52,6 +53,10 @@ class FakeRequest:
 
     async def read(self):
         return self._body
+
+
+def _session_env(mapping):
+    return lambda name: mapping.get(name, "")
 
 
 class FakeSendAdapter:
@@ -809,6 +814,92 @@ def test_create_listener_tool_fails_closed_without_current_origin(tmp_path):
     assert result["ok"] is False
     assert result["error"] == "source_unavailable"
     assert registry.list_handles() == []
+
+
+def test_listener_tools_fallback_to_matching_session_context_after_compression_split(monkeypatch, tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    handle = registry.create_handle(
+        source=_source(thread_id="thread-current").to_dict(),
+        producer_id="demo-ci",
+        allowed_event_types=["demo-ci.finished"],
+        owner_user_id="user-1",
+        session_key="key-current",
+        session_id="sid-old",
+    )
+    sessions_file = tmp_path / "sessions.json"
+    sessions_file.write_text(
+        json.dumps(
+            {
+                "key-current": {
+                    "session_key": "key-current",
+                    "session_id": "sid-old",
+                    "origin": _source(thread_id="thread-current").to_dict(),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        origin_module,
+        "_session_env",
+        _session_env(
+            {
+                "HERMES_SESSION_ID": "sid-new",
+                "HERMES_SESSION_KEY": "key-current",
+                "HERMES_SESSION_PLATFORM": "discord",
+                "HERMES_SESSION_CHAT_ID": "channel-1",
+                "HERMES_SESSION_THREAD_ID": "thread-current",
+                "HERMES_SESSION_USER_ID": "user-1",
+                "HERMES_SESSION_USER_NAME": "user-one",
+            }
+        ),
+    )
+
+    result = _loads(
+        ath_list_listeners_tool(
+            {"current_conversation_only": True},
+            registry=registry,
+            config=PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")}),
+            session_id="sid-new",
+            sessions_file=sessions_file,
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["count"] == 1
+    assert result["listeners"][0]["threadKey"] == handle.thread_key
+
+
+def test_listener_tools_still_fail_closed_when_context_session_mismatches(monkeypatch, tmp_path):
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    monkeypatch.setattr(
+        origin_module,
+        "_session_env",
+        _session_env(
+            {
+                "HERMES_SESSION_ID": "sid-other",
+                "HERMES_SESSION_KEY": "key-current",
+                "HERMES_SESSION_PLATFORM": "discord",
+                "HERMES_SESSION_CHAT_ID": "channel-1",
+                "HERMES_SESSION_THREAD_ID": "thread-current",
+                "HERMES_SESSION_USER_ID": "user-1",
+            }
+        ),
+    )
+
+    result = _loads(
+        ath_list_listeners_tool(
+            {},
+            registry=registry,
+            config=PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")}),
+            session_id="sid-new",
+            sessions_file=tmp_path / "none.json",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "source_unavailable"
+    assert result["diagnostics"]["sessionContextFallbackAttempted"] is False
 
 
 def test_list_inspect_and_retire_are_owner_scoped_and_hide_secret(tmp_path):

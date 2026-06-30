@@ -41,6 +41,10 @@ def _entry(source=None, session_key="agent:main:discord:channel:channel-1:thread
     return SimpleNamespace(origin=source or _discord_source(), session_key=session_key, session_id=session_id)
 
 
+def _session_env(mapping):
+    return lambda name: mapping.get(name, "")
+
+
 def test_resolves_current_origin_from_explicit_trusted_source():
     source = _discord_source()
 
@@ -225,13 +229,15 @@ def test_explicit_missing_session_does_not_fall_back_to_session_context(monkeypa
     monkeypatch.setattr(
         origin_module,
         "_session_env",
-        lambda name: {
-            "HERMES_SESSION_ID": "env-session",
-            "HERMES_SESSION_KEY": "env-key",
-            "HERMES_SESSION_PLATFORM": "discord",
-            "HERMES_SESSION_CHAT_ID": "env-channel",
-            "HERMES_SESSION_USER_ID": "env-user",
-        }.get(name, ""),
+        _session_env(
+            {
+                "HERMES_SESSION_ID": "env-session",
+                "HERMES_SESSION_KEY": "env-key",
+                "HERMES_SESSION_PLATFORM": "discord",
+                "HERMES_SESSION_CHAT_ID": "env-channel",
+                "HERMES_SESSION_USER_ID": "env-user",
+            }
+        ),
     )
 
     resolution = resolve_current_origin(
@@ -243,6 +249,82 @@ def test_explicit_missing_session_does_not_fall_back_to_session_context(monkeypa
 
     assert resolution.ok is False
     assert resolution.public_error()["error"] == "source_unavailable"
+
+
+def test_runtime_session_id_lookup_can_fallback_to_matching_session_context_after_split(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        origin_module,
+        "_session_env",
+        _session_env(
+            {
+                "HERMES_SESSION_ID": "sid-new",
+                "HERMES_SESSION_KEY": "key-current",
+                "HERMES_SESSION_PLATFORM": "discord",
+                "HERMES_SESSION_CHAT_ID": "channel-current",
+                "HERMES_SESSION_THREAD_ID": "thread-current",
+                "HERMES_SESSION_USER_ID": "user-1",
+                "HERMES_SESSION_USER_NAME": "user-one",
+                "HERMES_SESSION_MESSAGE_ID": "msg-current",
+            }
+        ),
+    )
+    sessions_file = tmp_path / "sessions.json"
+    sessions_file.write_text(
+        json.dumps(
+            {
+                "key-current": {
+                    "session_key": "key-current",
+                    "session_id": "sid-old",
+                    "origin": _discord_source(chat_id="channel-current", thread_id="thread-current").to_dict(),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resolution = resolve_current_origin(
+        session_id="sid-new",
+        sessions_file=sessions_file,
+        origin_index=OriginIndex(),
+        allow_session_context_fallback_on_lookup_miss=True,
+    )
+
+    assert resolution.ok is True
+    assert resolution.source_kind == "session_context"
+    assert resolution.session_id == "sid-new"
+    assert resolution.session_key == "key-current"
+    assert resolution.source_dict["chat_id"] == "channel-current"
+    assert resolution.source_dict["thread_id"] == "thread-current"
+    assert resolution.owner_user_id == "user-1"
+
+
+def test_session_context_fallback_rejects_mismatched_session_id(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        origin_module,
+        "_session_env",
+        _session_env(
+            {
+                "HERMES_SESSION_ID": "sid-other",
+                "HERMES_SESSION_KEY": "key-current",
+                "HERMES_SESSION_PLATFORM": "discord",
+                "HERMES_SESSION_CHAT_ID": "channel-current",
+                "HERMES_SESSION_THREAD_ID": "thread-current",
+                "HERMES_SESSION_USER_ID": "user-1",
+            }
+        ),
+    )
+
+    resolution = resolve_current_origin(
+        session_id="sid-new",
+        sessions_file=tmp_path / "none.json",
+        origin_index=OriginIndex(),
+        allow_session_context_fallback_on_lookup_miss=True,
+    )
+
+    assert resolution.ok is False
+    public = resolution.public_error()
+    assert public["error"] == "source_unavailable"
+    assert public["diagnostics"]["sessionContextFallbackAttempted"] is False
 
 
 def test_missing_source_fails_closed_without_creating_handle(tmp_path):
