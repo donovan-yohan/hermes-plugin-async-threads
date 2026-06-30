@@ -48,6 +48,7 @@ async def test_async_registry_facade_offloads_calls(monkeypatch):
     await facade.returns_none()
 
     assert "returns_str" in seen
+    assert facade.returns_str is facade.returns_str
     assert spy.calls
     assert all(thread_ident != caller_ident for _name, thread_ident in spy.calls)
 

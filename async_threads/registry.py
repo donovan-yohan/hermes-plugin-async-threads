@@ -1325,6 +1325,7 @@ class AsyncThreadRegistryAsync:
         async def _offloaded(*args, **kwargs):
             return await asyncio.to_thread(attr, *args, **kwargs)
 
+        setattr(self, name, _offloaded)
         return _offloaded
 
 def _row_to_handle(row: sqlite3.Row) -> AsyncThreadHandle:
