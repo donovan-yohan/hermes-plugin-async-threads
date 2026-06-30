@@ -727,6 +727,7 @@ def _resolve_origin(kwargs: Mapping[str, Any]) -> OriginResolution:
         sessions_file=kwargs.get("sessions_file"),
         origin_index=kwargs.get("origin_index"),
         trusted_context=kwargs.get("trusted_context") if isinstance(kwargs.get("trusted_context"), Mapping) else None,
+        allow_session_context_fallback_on_lookup_miss=True,
     )
 
 

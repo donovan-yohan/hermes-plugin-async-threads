@@ -27,14 +27,21 @@ class OriginResolution:
     error: str = ""
     message: str = ""
     remediation: str = ""
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def unavailable(cls, message: str = "current gateway origin unavailable") -> "OriginResolution":
+    def unavailable(
+        cls,
+        message: str = "current gateway origin unavailable",
+        *,
+        diagnostics: Mapping[str, Any] | None = None,
+    ) -> "OriginResolution":
         return cls(
             ok=False,
             error=UNAVAILABLE_ERROR,
             message=message,
             remediation="Use this from a live gateway conversation, or fall back to /ath listen from the target thread.",
+            diagnostics=dict(diagnostics or {}),
         )
 
     def public_error(self) -> dict[str, Any]:
@@ -42,12 +49,15 @@ class OriginResolution:
 
         if self.ok:
             return {"ok": True}
-        return {
+        error = {
             "ok": False,
             "error": self.error or UNAVAILABLE_ERROR,
             "message": self.message or "current gateway origin unavailable",
             "remediation": self.remediation,
         }
+        if self.diagnostics:
+            error["diagnostics"] = self.diagnostics
+        return error
 
 
 class OriginIndex:
@@ -113,6 +123,7 @@ def resolve_current_origin(
     session_store: Any | None = None,
     sessions_file: str | Path | None = None,
     origin_index: OriginIndex | None = None,
+    allow_session_context_fallback_on_lookup_miss: bool = False,
 ) -> OriginResolution:
     """Resolve the gateway origin for a model-facing ATH operation.
 
@@ -134,13 +145,25 @@ def resolve_current_origin(
     trusted_source = source
     explicit_sid = _first_text(session_id, context.get("session_id"))
     explicit_skey = _first_text(session_key, context.get("session_key"))
+    env_sid = _session_env("HERMES_SESSION_ID")
+    env_skey = _session_env("HERMES_SESSION_KEY")
     explicit_lookup = bool(explicit_sid or explicit_skey)
     if explicit_lookup:
         sid = explicit_sid
         skey = explicit_skey
     else:
-        sid = _session_env("HERMES_SESSION_ID")
-        skey = _session_env("HERMES_SESSION_KEY")
+        sid = env_sid
+        skey = env_skey
+
+    diagnostics: dict[str, Any] = {
+        "explicitLookup": explicit_lookup,
+        "sessionIdPresent": bool(sid),
+        "sessionKeyPresent": bool(skey),
+        "sessionContextIdPresent": bool(env_sid),
+        "sessionContextKeyPresent": bool(env_skey),
+        "sessionContextRoutable": _session_context_has_routable_source(),
+        "failedStages": [],
+    }
 
     if trusted_source is not None:
         return _resolution_from_source(
@@ -154,6 +177,7 @@ def resolve_current_origin(
     from_store = _lookup_store(store, session_id=sid, session_key=skey)
     if from_store is not None:
         return from_store
+    diagnostics["failedStages"].append("session_store")
 
     from_file = _lookup_sessions_file(
         Path(sessions_file) if sessions_file is not None else _default_sessions_file(),
@@ -162,20 +186,39 @@ def resolve_current_origin(
     )
     if from_file is not None:
         return from_file
+    diagnostics["failedStages"].append("sessions_file")
 
     index = origin_index or get_origin_index()
     indexed = index.lookup(session_id=sid, session_key=skey)
     if indexed is not None:
         return indexed
+    diagnostics["failedStages"].append("origin_index")
 
     if explicit_lookup:
-        return OriginResolution.unavailable()
+        if allow_session_context_fallback_on_lookup_miss and _session_context_matches_explicit_lookup(
+            explicit_sid=explicit_sid,
+            explicit_skey=explicit_skey,
+            env_sid=env_sid,
+            env_skey=env_skey,
+        ):
+            diagnostics["sessionContextFallbackAttempted"] = True
+            from_env = _resolution_from_session_context(
+                session_id=explicit_sid or env_sid,
+                session_key=explicit_skey or env_skey,
+            )
+            if from_env is not None:
+                return from_env
+            diagnostics["failedStages"].append("session_context")
+        else:
+            diagnostics["sessionContextFallbackAttempted"] = False
+        return OriginResolution.unavailable(diagnostics=diagnostics)
 
     from_env = _resolution_from_session_context(session_id=sid, session_key=skey)
     if from_env is not None:
         return from_env
+    diagnostics["failedStages"].append("session_context")
 
-    return OriginResolution.unavailable()
+    return OriginResolution.unavailable(diagnostics=diagnostics)
 
 
 def remember_gateway_origin(
@@ -336,6 +379,40 @@ def _resolution_from_session_context(*, session_id: str, session_key: str) -> Or
         "message_id": _session_env("HERMES_SESSION_MESSAGE_ID") or None,
     }
     return _resolution_from_source(source, session_key=session_key, session_id=session_id, source_kind="session_context")
+
+
+def _session_context_has_routable_source() -> bool:
+    platform = _session_env("HERMES_SESSION_PLATFORM")
+    chat_id = _session_env("HERMES_SESSION_CHAT_ID")
+    return bool(platform and chat_id and _normalize_platform(platform) not in LOCAL_ONLY_PLATFORMS)
+
+
+def _session_context_matches_explicit_lookup(
+    *,
+    explicit_sid: str,
+    explicit_skey: str,
+    env_sid: str,
+    env_skey: str,
+) -> bool:
+    """Return whether a trusted session-context fallback is safe.
+
+    Hermes core passes the live agent ``session_id`` to registry-dispatched
+    plugin tools. During compression rotation that id can be newer than the
+    gateway SessionStore/sessions.json mapping until the turn returns, so a
+    strict lookup by id can miss even inside the live gateway conversation. The
+    ambient gateway session context is still trusted, but only use it when it
+    agrees with any explicit ids/keys we were given.
+    """
+
+    if explicit_sid and env_sid and explicit_sid != env_sid:
+        return False
+    if explicit_skey and env_skey and explicit_skey != env_skey:
+        return False
+    if explicit_sid and not env_sid:
+        return False
+    if explicit_skey and not env_skey:
+        return False
+    return _session_context_has_routable_source()
 
 
 def _source_is_gateway_routable(source: Mapping[str, Any]) -> bool:
