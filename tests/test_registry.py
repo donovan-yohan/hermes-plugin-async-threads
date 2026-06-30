@@ -1,13 +1,66 @@
+import asyncio
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
 
 from async_threads import registry as registry_module
 from async_threads.ingress_digest import resolve_ingress_digest_policy
-from async_threads.registry import AsyncThreadRegistry, SCHEMA_VERSION, sanitize_event_detail
+from async_threads.registry import AsyncThreadRegistry, AsyncThreadRegistryAsync, SCHEMA_VERSION, sanitize_event_detail
 from async_threads.workflows import WorkflowPolicy, normalize_workflow_event
+
+
+class _SpyRegistry:
+    def __init__(self):
+        self.calls = []
+        self.attr = "plain-value"
+
+    def returns_str(self):
+        self.calls.append(("returns_str", threading.get_ident()))
+        return "ok"
+
+    def returns_none(self):
+        self.calls.append(("returns_none", threading.get_ident()))
+        return None
+
+    def raises(self):
+        self.calls.append(("raises", threading.get_ident()))
+        raise ValueError("boom")
+
+
+@pytest.mark.asyncio
+async def test_async_registry_facade_offloads_calls(monkeypatch):
+    spy = _SpyRegistry()
+    facade = AsyncThreadRegistryAsync(spy)
+    caller_ident = threading.get_ident()
+    seen = []
+    real_to_thread = asyncio.to_thread
+
+    async def _spy_to_thread(func, *args, **kwargs):
+        seen.append(getattr(func, "__name__", repr(func)))
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(registry_module.asyncio, "to_thread", _spy_to_thread)
+
+    assert await facade.returns_str() == "ok"
+    await facade.returns_none()
+
+    assert "returns_str" in seen
+    assert facade.returns_str is facade.returns_str
+    assert spy.calls
+    assert all(thread_ident != caller_ident for _name, thread_ident in spy.calls)
+
+
+def test_async_registry_facade_exposes_plain_attributes():
+    assert AsyncThreadRegistryAsync(_SpyRegistry()).attr == "plain-value"
+
+
+@pytest.mark.asyncio
+async def test_async_registry_facade_propagates_exceptions():
+    with pytest.raises(ValueError, match="boom"):
+        await AsyncThreadRegistryAsync(_SpyRegistry()).raises()
 
 
 def test_registry_creates_lists_revokes_and_dedupes(tmp_path: Path):

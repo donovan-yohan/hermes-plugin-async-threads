@@ -192,6 +192,12 @@ See [`docs/SECURITY.md`](docs/SECURITY.md) for more detail.
 - Active-session queueing currently relies on Hermes gateway/adapter internals; the continuation API spike names the smallest core seam to remove that coupling.
 - CLI and Hermes Desktop cannot create a listener from “here” yet; listener creation needs a live gateway origin, and no-source contexts fail closed.
 
+## Gateway and ATH registry SQLite offload boundary
+
+Hermes gateway stores session history in `state.db`. Current upstream Hermes wraps gateway `SessionDB` access in an `AsyncSessionDB` facade so synchronous SQLite lock waits run in worker threads instead of freezing the gateway asyncio loop.
+
+ATH has a separate plugin-local registry/outbox database at `async_threads/registry.sqlite3`. Upstream `AsyncSessionDB` does not cover that file. ATH receiver paths therefore route registry calls through the plugin-owned async/offload facade before signed-event dispatch, duplicate marking, payload pointer storage, workflow state updates, lifecycle auto-retire, and event logging. Source-binding execution still keeps the product path event-driven; cron polling remains an emergency fallback only, not the normal architecture.
+
 ## Dynamic Workflows finalizer adapter
 
 Dynamic Workflows owns the backend-neutral resource/finalizer contract. ATH owns the concrete listener cleanup action. Use `async_threads.finalizers` to register the ATH handler with a Dynamic Workflows `ResourceFinalizerRegistry`:

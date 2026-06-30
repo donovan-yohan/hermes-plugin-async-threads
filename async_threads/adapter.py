@@ -11,7 +11,7 @@ from typing import Any, Mapping
 from .ingress_digest import resolve_ingress_digest_policy
 from .lifecycle import is_terminal_event, terminal_action
 from .privacy import redact_metadata_text, safe_event_id
-from .registry import AsyncThreadHandle, AsyncThreadRegistry, safe_session_key_hash
+from .registry import AsyncThreadHandle, AsyncThreadRegistry, AsyncThreadRegistryAsync, safe_session_key_hash
 from .rendering import render_event_message, tail_mode_from_event
 from .routing import send_metadata_for_source
 from .secrets import remove_secret_artifact, secret_root_from_config
@@ -171,6 +171,7 @@ def _build_adapter_base():
             super().__init__(config, Platform("async_threads"))
             self.gateway_runner = None
             self._registry = registry_from_config(config)
+            self._registry_async = AsyncThreadRegistryAsync(self._registry)
             self._runner = None
             self._site = None
             self._host = str((config.extra or {}).get("host", "127.0.0.1"))
@@ -227,7 +228,7 @@ def _build_adapter_base():
                 task.cancel()
             for pending in list(self._coalesced_events.values()) + list(self._coalesced_inflight.values()):
                 for item in pending:
-                    self._registry.forget_seen(
+                    await self._registry_async.forget_seen(
                         producer_id=item["fields"]["producer_id"],
                         event_id=item["fields"]["event_id"],
                     )
@@ -249,7 +250,7 @@ def _build_adapter_base():
         async def _run_source_bindings_once(self) -> list[dict[str, Any]]:
             bindings = [
                 binding
-                for binding in self._registry.list_source_bindings(source="kanban", include_retired=False, limit=100)
+                for binding in await self._registry_async.list_source_bindings(source="kanban", include_retired=False, limit=100)
                 if binding.status == "active"
             ]
             event_url = _event_url_from_config(self.config, host=self._host, port=self._port)
@@ -297,14 +298,14 @@ def _build_adapter_base():
                     data.get("occurredAt"),
                     replay_window_seconds=self._replay_window_seconds,
                 )
-                handle = self._registry.get_handle(fields["thread_key"])
+                handle = await self._registry_async.get_handle(fields["thread_key"])
                 if handle is None:
                     return web.json_response({"error": "invalid signature"}, status=401)
                 if not verify_hmac_signature(raw, handle.secret, signature_header(request.headers)):
                     return web.json_response({"error": "invalid signature"}, status=401)
                 if not handle.enabled:
-                    if self._registry.has_seen(producer_id=fields["producer_id"], event_id=fields["event_id"]):
-                        self._registry.log_event(
+                    if await self._registry_async.has_seen(producer_id=fields["producer_id"], event_id=fields["event_id"]):
+                        await self._registry_async.log_event(
                             producer_id=fields["producer_id"],
                             event_id=fields["event_id"],
                             thread_key=fields["thread_key"],
@@ -314,7 +315,7 @@ def _build_adapter_base():
                             detail={"handle_enabled": False, "policy": handle.policy, "target_platform": handle.platform},
                         )
                         return web.json_response({"status": "duplicate", "threadKey": handle.thread_key})
-                    self._registry.log_event(
+                    await self._registry_async.log_event(
                         producer_id=fields["producer_id"],
                         event_id=fields["event_id"],
                         thread_key=fields["thread_key"],
@@ -325,7 +326,7 @@ def _build_adapter_base():
                     )
                     return web.json_response({"error": "invalid signature"}, status=401)
                 if handle.producer_id != fields["producer_id"]:
-                    self._registry.log_event(
+                    await self._registry_async.log_event(
                         producer_id=fields["producer_id"],
                         event_id=fields["event_id"],
                         thread_key=fields["thread_key"],
@@ -336,7 +337,7 @@ def _build_adapter_base():
                     )
                     return web.json_response({"error": "invalid signature"}, status=401)
                 if handle.allowed_event_types and fields["event_type"] not in handle.allowed_event_types:
-                    self._registry.log_event(
+                    await self._registry_async.log_event(
                         producer_id=fields["producer_id"],
                         event_id=fields["event_id"],
                         thread_key=fields["thread_key"],
@@ -346,7 +347,7 @@ def _build_adapter_base():
                         detail={"handle_enabled": handle.enabled, "policy": handle.policy, "target_platform": handle.platform},
                     )
                     return web.json_response({"error": "invalid signature"}, status=401)
-                if not self._registry.mark_seen(
+                if not await self._registry_async.mark_seen(
                     producer_id=fields["producer_id"],
                     event_id=fields["event_id"],
                     thread_key=fields["thread_key"],
@@ -357,7 +358,7 @@ def _build_adapter_base():
                         event_id=fields["event_id"],
                     ):
                         return web.json_response({"status": "queued", "threadKey": handle.thread_key}, status=202)
-                    self._registry.log_event(
+                    await self._registry_async.log_event(
                         producer_id=fields["producer_id"],
                         event_id=fields["event_id"],
                         thread_key=fields["thread_key"],
@@ -368,13 +369,13 @@ def _build_adapter_base():
                     )
                     return web.json_response({"status": "duplicate", "threadKey": handle.thread_key})
 
-                source_binding, ingress_policy, payload_record = self._resolve_ingress_payload(handle, data, fields)
+                source_binding, ingress_policy, payload_record = await self._resolve_ingress_payload(handle, data, fields)
 
                 if self._has_pending_coalesced(handle) and self._is_priority_event(data, fields):
                     await self._flush_coalesced(handle.thread_key, reason="priority_flush")
                 elif self._should_coalesce(handle, data, fields):
-                    detail = self._queue_coalesced_event(handle, data, fields, source_binding=source_binding)
-                    self._registry.log_event(
+                    detail = await self._queue_coalesced_event(handle, data, fields, source_binding=source_binding)
+                    await self._registry_async.log_event(
                         producer_id=fields["producer_id"],
                         event_id=fields["event_id"],
                         thread_key=fields["thread_key"],
@@ -388,7 +389,7 @@ def _build_adapter_base():
                 try:
                     outcome, detail = await self.dispatch_event(handle, data, fields, ingress_policy=ingress_policy, payload_record=payload_record)
                 except Exception as exc:
-                    self._registry.forget_seen(
+                    await self._registry_async.forget_seen(
                         producer_id=fields["producer_id"],
                         event_id=fields["event_id"],
                     )
@@ -401,7 +402,7 @@ def _build_adapter_base():
                             "exception_message": str(exc),
                         }
                     )
-                    self._registry.log_event(
+                    await self._registry_async.log_event(
                         producer_id=fields["producer_id"],
                         event_id=fields["event_id"],
                         thread_key=fields["thread_key"],
@@ -411,9 +412,9 @@ def _build_adapter_base():
                         detail=detail,
                     )
                     raise
-                self._record_workflow_state(handle, data, fields, detail)
-                self._apply_lifecycle_after_dispatch(handle, data, fields, detail)
-                self._registry.log_event(
+                await self._record_workflow_state(handle, data, fields, detail)
+                await self._apply_lifecycle_after_dispatch(handle, data, fields, detail)
+                await self._registry_async.log_event(
                     producer_id=fields["producer_id"],
                     event_id=fields["event_id"],
                     thread_key=fields["thread_key"],
@@ -549,7 +550,7 @@ def _build_adapter_base():
             detail["handle_message_returned"] = True
             return "agent_started", detail
 
-        def _resolve_ingress_payload(
+        async def _resolve_ingress_payload(
             self,
             handle: AsyncThreadHandle,
             data: Mapping[str, Any],
@@ -558,7 +559,7 @@ def _build_adapter_base():
             source_binding: Any | None = None,
         ) -> tuple[Any | None, Any, Any | None]:
             if source_binding is None:
-                source_binding = self._registry.find_source_binding_for_event(
+                source_binding = await self._registry_async.find_source_binding_for_event(
                     thread_key=handle.thread_key,
                     producer_id=fields["producer_id"],
                     event_id=fields["event_id"],
@@ -568,7 +569,7 @@ def _build_adapter_base():
                 listener_policy=handle.ingress_digest_policy,
                 source_binding_policy=source_binding.ingress_digest_policy if source_binding is not None else None,
             )
-            payload_record = self._registry.store_event_payload(
+            payload_record = await self._registry_async.store_event_payload(
                 handle=handle,
                 data=data,
                 fields=fields,
@@ -577,7 +578,7 @@ def _build_adapter_base():
             )
             return source_binding, ingress_policy, payload_record
 
-        def _record_workflow_state(
+        async def _record_workflow_state(
             self,
             handle: AsyncThreadHandle,
             data: Mapping[str, Any],
@@ -585,7 +586,7 @@ def _build_adapter_base():
             detail: dict[str, Any],
         ) -> None:
             try:
-                state = self._registry.update_workflow_state_from_event(handle=handle, data=data, fields=fields)
+                state = await self._registry_async.update_workflow_state_from_event(handle=handle, data=data, fields=fields)
             except Exception as exc:  # noqa: BLE001 - event was already dispatched; diagnostics must not poison retry semantics
                 logger.error("async-thread workflow state update failed: %s", type(exc).__name__)
                 detail["error"] = "workflow_state_update_failed"
@@ -595,7 +596,7 @@ def _build_adapter_base():
             detail["workflow_id"] = state.workflow_id
             detail["workflow_stage"] = state.stage
 
-        def _apply_lifecycle_after_dispatch(
+        async def _apply_lifecycle_after_dispatch(
             self,
             handle: AsyncThreadHandle,
             data: Mapping[str, Any],
@@ -612,7 +613,7 @@ def _build_adapter_base():
             if action != "auto_retired":
                 detail["terminal_retired"] = False
                 return
-            retired = self._registry.set_enabled(handle.thread_key, False)
+            retired = await self._registry_async.set_enabled(handle.thread_key, False)
             remove_secret_artifact(handle.thread_key, root=secret_root_from_config(self.config))
             detail["terminal_retired"] = bool(retired)
 
@@ -640,7 +641,7 @@ def _build_adapter_base():
                         return True
             return False
 
-        def _queue_coalesced_event(
+        async def _queue_coalesced_event(
             self,
             handle: AsyncThreadHandle,
             data: Mapping[str, Any],
@@ -660,7 +661,7 @@ def _build_adapter_base():
                 "coalesced_reason": "debounce_window",
                 "debounce_seconds": handle.debounce_seconds,
             }
-            self._record_workflow_state(handle, data, fields, detail)
+            await self._record_workflow_state(handle, data, fields, detail)
             return detail
 
         async def _flush_coalesced_after(self, thread_key: str, delay_seconds: int) -> None:
@@ -682,7 +683,7 @@ def _build_adapter_base():
             self._coalesced_inflight[thread_key] = pending
             handle = pending[-1]["handle"]
             data, fields = self._coalesced_digest(pending, reason=reason)
-            _source_binding, ingress_policy, payload_record = self._resolve_ingress_payload(
+            _source_binding, ingress_policy, payload_record = await self._resolve_ingress_payload(
                 handle,
                 data,
                 fields,
@@ -701,7 +702,7 @@ def _build_adapter_base():
                             "exception_message": str(exc),
                         }
                     )
-                    self._registry.log_event(
+                    await self._registry_async.log_event(
                         producer_id=fields["producer_id"],
                         event_id=fields["event_id"],
                         thread_key=fields["thread_key"],
@@ -713,13 +714,13 @@ def _build_adapter_base():
                     if self._requeue_failed_coalesced(thread_key, pending):
                         return
                     for item in pending:
-                        self._registry.forget_seen(
+                        await self._registry_async.forget_seen(
                             producer_id=item["fields"]["producer_id"],
                             event_id=item["fields"]["event_id"],
                         )
                     return
                 detail.update({"coalesced_count": len(pending), "coalesced_reason": reason})
-                self._registry.log_event(
+                await self._registry_async.log_event(
                     producer_id=fields["producer_id"],
                     event_id=fields["event_id"],
                     thread_key=fields["thread_key"],
