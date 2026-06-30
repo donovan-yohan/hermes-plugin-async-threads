@@ -6,7 +6,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 KANBAN_EVENT_PREFIX = "kanban.task."
-KANBAN_DEFAULT_MATERIAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out")
+KANBAN_DEFAULT_MATERIAL_KINDS = ("completed", "blocked", "unblocked", "gave_up", "crashed", "timed_out")
 KANBAN_READY_FOR_REVIEW_KIND = "ready_for_review"
 KANBAN_DEFAULT_EVENT_TYPES = tuple(
     f"{KANBAN_EVENT_PREFIX}{kind}" for kind in (*KANBAN_DEFAULT_MATERIAL_KINDS, KANBAN_READY_FOR_REVIEW_KIND)

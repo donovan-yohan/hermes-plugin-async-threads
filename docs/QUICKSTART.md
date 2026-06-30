@@ -173,7 +173,7 @@ Use this when the board itself records material task transitions and you want th
 Natural-language ask from the mapped conversation:
 
 ```text
-bind Kanban board ath to listener ath_... through producer ath-kanban-bridge; wake this thread only for blocked, completed, crashed, gave_up, timed_out, and ready_for_review transitions; dry-run before enabling the runner
+bind Kanban board ath to listener ath_... through producer ath-kanban-bridge; wake this thread only for blocked, unblocked, completed, crashed, gave_up, timed_out, and ready_for_review transitions; dry-run before enabling the runner
 ```
 
 Expected model-facing tool path:
@@ -199,7 +199,7 @@ platforms:
 Manual admin/debug equivalents:
 
 ```text
-/ath bind-source kanban ath_... --board ath --producer ath-kanban-bridge --events kanban.task.blocked,kanban.task.completed,kanban.task.crashed,kanban.task.gave_up,kanban.task.timed_out,kanban.task.ready_for_review
+/ath bind-source kanban ath_... --board ath --producer ath-kanban-bridge --events kanban.task.blocked,kanban.task.unblocked,kanban.task.completed,kanban.task.crashed,kanban.task.gave_up,kanban.task.timed_out,kanban.task.ready_for_review
 /ath dry-run-binding <binding_id> --db /absolute/path/to/kanban.db --json
 /ath inspect-binding <binding_id>
 /ath trace <event_id> --json

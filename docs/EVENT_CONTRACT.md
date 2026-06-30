@@ -118,7 +118,7 @@ For Kanban source bindings, the default event shape is:
 }
 ```
 
-Default Kanban material events are `kanban.task.blocked`, `kanban.task.completed`, `kanban.task.crashed`, `kanban.task.gave_up`, `kanban.task.timed_out`, and `kanban.task.ready_for_review`. The idempotency key is `<board>:<task_id>:<task_event_id>` and the series/workflow key is `kanban:<board>:<task_id>`. Routine comments, heartbeats, claims, spawns, and promotions are suppressed unless an explicit digest/coalescing policy is configured.
+Default Kanban material events are `kanban.task.blocked`, `kanban.task.unblocked`, `kanban.task.completed`, `kanban.task.crashed`, `kanban.task.gave_up`, `kanban.task.timed_out`, and `kanban.task.ready_for_review`. `kanban.task.unblocked` is the native blocked-resolved signal for source bindings and replaces bespoke blocked/resolved watchers. The idempotency key is `<board>:<task_id>:<task_event_id>` and the series/workflow key is `kanban:<board>:<task_id>`. Routine comments, heartbeats, claims, spawns, and promotions are suppressed unless an explicit digest/coalescing policy is configured.
 
 Source-binding events must keep raw task comments, task bodies, full logs, terminal transcripts, credentials, cookies, authorization headers, HMAC secrets, and prompt-like instructions out of the envelope. Put compact status facts and evidence handles in `subject`/`payload`, then use `/ath inspect-binding`, `ath_get_source_binding`, `/ath trace`, or `ath_trace_event` for diagnostics.
 

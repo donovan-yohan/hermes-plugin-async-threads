@@ -5,7 +5,7 @@
 ### Added
 
 - Producer-agnostic source-binding registry for connecting external event streams to existing ATH listeners without retargeting the listener.
-- Kanban `task_events` source adapter with material-transition filtering for `blocked`, `completed`, `crashed`, `gave_up`, `timed_out`, and `ready_for_review` task events.
+- Kanban `task_events` source adapter with material-transition filtering for `blocked`, `unblocked`, `completed`, `crashed`, `gave_up`, `timed_out`, and `ready_for_review` task events.
 - Dry-run and inspection surfaces for source bindings, including cursor preview, compatibility checks, suppressed-event counts, and redacted diagnostics.
 - Config-gated native source-binding runner with durable cursor and outbox state; no Hermes cron job is required for the intended path.
 - Reusable ATH emitter helper and producer handoff improvements for local producers and bridge authors.
