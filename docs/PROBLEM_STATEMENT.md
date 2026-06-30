@@ -291,6 +291,7 @@ A useful MVP can be small:
 Kanban is the first reference adapter because the shared board already persists durable `task_events`. Its default material transitions are:
 
 - `kanban.task.blocked`
+- `kanban.task.unblocked` for native blocked-resolved wakeups
 - `kanban.task.completed`
 - `kanban.task.crashed`
 - `kanban.task.gave_up`

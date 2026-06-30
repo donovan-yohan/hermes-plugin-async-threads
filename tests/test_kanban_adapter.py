@@ -69,6 +69,19 @@ def _make_board_db(path):
         conn.close()
 
 
+def _insert_task_event(path, *, kind, payload=None, created_at=1700000010):
+    conn = sqlite3.connect(path)
+    try:
+        cursor = conn.execute(
+            "insert into task_events(task_id, run_id, kind, payload, created_at) values (?, ?, ?, ?, ?)",
+            ("t_safe", 5, kind, json.dumps(payload) if payload is not None else None, created_at),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+    finally:
+        conn.close()
+
+
 def test_read_kanban_task_events_since_cursor_and_transform_material_events_safely(tmp_path):
     board_db = tmp_path / "kanban.db"
     _make_board_db(board_db)
@@ -162,6 +175,34 @@ def test_kanban_transform_suppresses_noise_and_maps_review_required_blockers(tmp
     assert blocked_kind_filter["reason"] == "event_type_not_allowed"
 
 
+def test_kanban_transform_maps_unblocked_to_native_material_event(tmp_path):
+    board_db = tmp_path / "kanban.db"
+    _make_board_db(board_db)
+    event_id = _insert_task_event(board_db, kind="unblocked", payload={"reason": "human answered blocker"})
+    unblocked = read_kanban_task_events(board_db, since_event_id=event_id - 1, limit=10)[0]
+
+    transformed = transform_kanban_task_event(
+        unblocked,
+        board="ath",
+        thread_key="ath_listener",
+        event_filter={"eventKinds": ["unblocked"]},
+    )
+    disallowed = transform_kanban_task_event(
+        unblocked,
+        board="ath",
+        thread_key="ath_listener",
+        event_filter={"eventKinds": ["blocked"]},
+    )
+
+    assert transformed["action"] == "would_emit"
+    assert transformed["eventType"] == "kanban.task.unblocked"
+    assert transformed["envelope"]["stage"] == "unblocked"
+    assert transformed["envelope"]["payload"]["status"] == "unblocked"
+    assert transformed["envelope"]["payload"]["eventDetail"] == "human answered blocker"
+    assert disallowed["action"] == "suppressed"
+    assert disallowed["reason"] == "event_type_not_allowed"
+
+
 def test_kanban_dry_run_reports_counts_cursor_and_malformed_payloads_without_advancing(tmp_path):
     board_dir = tmp_path / "board"
     board_dir.mkdir()
@@ -195,6 +236,34 @@ def test_kanban_dry_run_reports_counts_cursor_and_malformed_payloads_without_adv
     assert malformed["action"] == "would_emit"
     assert malformed["envelope"]["payload"]["payloadParseError"] is True
     assert "not-json" not in json.dumps(report, sort_keys=True)
+
+
+def test_kanban_dry_run_reports_would_emit_for_allowed_unblocked_event(tmp_path):
+    board_db = tmp_path / "kanban.db"
+    _make_board_db(board_db)
+    event_id = _insert_task_event(board_db, kind="unblocked", payload={"reason": "dependency resolved"})
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    listener = registry.create_handle(
+        source={"platform": "discord", "chat_id": "c", "chat_type": "channel", "thread_id": "t"},
+        producer_id="ath-kanban-bridge",
+        allowed_event_types=["kanban.task.unblocked"],
+        owner_user_id="u1",
+    )
+    binding = registry.create_source_binding(
+        owner_user_id="u1",
+        source="kanban",
+        source_ref={"board": "ath", "taskId": "t_safe"},
+        listener_thread_key=listener.thread_key,
+        event_filter={"eventKinds": ["unblocked"]},
+        cursor={"last_event_id": event_id - 1},
+    )
+
+    report = dry_run_kanban_source_binding(registry=registry, binding=binding, board_db_path=board_db, limit=10)
+
+    assert report["ok"] is True
+    assert report["counts"] == {"would_emit": 1, "suppressed": 0, "would_coalesce": 0, "invalid_binding": 0}
+    assert report["events"][0]["action"] == "would_emit"
+    assert report["events"][0]["eventType"] == "kanban.task.unblocked"
 
 
 def test_kanban_read_failed_report_is_shared_and_redacted(tmp_path):

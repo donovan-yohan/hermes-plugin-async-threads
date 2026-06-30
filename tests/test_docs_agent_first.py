@@ -78,6 +78,7 @@ def test_docs_cover_kanban_source_binding_dogfood_without_cron_or_raw_payloads()
         assert "ath_mg3BQeDs15Gm4DnF" in text
         assert "ath-kanban-bridge" in text
         assert "kanban.task.blocked" in text
+        assert "kanban.task.unblocked" in text
         assert "kanban.task.completed" in text
         assert "kanban.task.crashed" in text
         assert "kanban.task.gave_up" in text

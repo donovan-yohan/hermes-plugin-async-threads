@@ -24,7 +24,7 @@ Example listener/event scope:
 ```text
 thread key: ath_...
 producer: ath-kanban-bridge
-events: kanban.task.blocked,kanban.task.completed,kanban.task.crashed,kanban.task.gave_up,kanban.task.timed_out,kanban.task.ready_for_review
+events: kanban.task.blocked,kanban.task.unblocked,kanban.task.completed,kanban.task.crashed,kanban.task.gave_up,kanban.task.timed_out,kanban.task.ready_for_review
 ```
 
 ## 1. Create the binding
@@ -40,6 +40,7 @@ Model-facing tool shape:
   "event_filter": {
     "eventTypes": [
       "kanban.task.blocked",
+      "kanban.task.unblocked",
       "kanban.task.completed",
       "kanban.task.crashed",
       "kanban.task.gave_up",
@@ -56,7 +57,7 @@ Manual admin equivalent:
 /ath bind-source kanban ath_... \
   --board ath \
   --producer ath-kanban-bridge \
-  --events kanban.task.blocked,kanban.task.completed,kanban.task.crashed,kanban.task.gave_up,kanban.task.timed_out,kanban.task.ready_for_review
+  --events kanban.task.blocked,kanban.task.unblocked,kanban.task.completed,kanban.task.crashed,kanban.task.gave_up,kanban.task.timed_out,kanban.task.ready_for_review
 ```
 
 Expected result: a binding id such as `athb_...` plus compatibility status. The command must not print listener secrets.

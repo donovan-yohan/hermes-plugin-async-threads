@@ -195,18 +195,18 @@ Bridge checklist:
 5. Retry `502`/transport failures with the same `eventId`.
 6. Never include raw board comments, credentials, cookies, terminal transcripts, or prompt text as instructions.
 
-For native board integrations, persist this routing as a source binding instead of a cron poller. Bind `source=kanban` plus the board ref to an existing listener with `/ath bind-source kanban <thread_key> --board <board> --events kanban.task.blocked,kanban.task.completed,...`, or use the model-facing `ath_create_source_binding` tool. Listing/inspection redacts secret-shaped material and reports listener compatibility fail-closed; pausing or retiring a binding never retires the underlying listener.
+For native board integrations, persist this routing as a source binding instead of a cron poller. Bind `source=kanban` plus the board ref to an existing listener with `/ath bind-source kanban <thread_key> --board <board> --events kanban.task.blocked,kanban.task.unblocked,kanban.task.completed,...`, or use the model-facing `ath_create_source_binding` tool. Listing/inspection redacts secret-shaped material and reports listener compatibility fail-closed; pausing or retiring a binding never retires the underlying listener.
 
 Dogfood binding for the shared `ath` board:
 
 ```text
-/ath bind-source kanban ath_mg3BQeDs15Gm4DnF --board ath --producer ath-kanban-bridge --events kanban.task.blocked,kanban.task.completed,kanban.task.crashed,kanban.task.gave_up,kanban.task.timed_out,kanban.task.ready_for_review
+/ath bind-source kanban ath_mg3BQeDs15Gm4DnF --board ath --producer ath-kanban-bridge --events kanban.task.blocked,kanban.task.unblocked,kanban.task.completed,kanban.task.crashed,kanban.task.gave_up,kanban.task.timed_out,kanban.task.ready_for_review
 ```
 
 Natural-language equivalent from a mapped conversation:
 
 ```text
-bind board ath to listener ath_mg3BQeDs15Gm4DnF with the ath-kanban-bridge producer; wake this thread only for blocked, completed, crashed, gave_up, timed_out, and ready_for_review transitions; dry-run before enabling the native runner
+bind board ath to listener ath_mg3BQeDs15Gm4DnF with the ath-kanban-bridge producer; wake this thread only for blocked, unblocked, completed, crashed, gave_up, timed_out, and ready_for_review transitions; dry-run before enabling the native runner
 ```
 
 Model-facing equivalent:
@@ -220,6 +220,7 @@ Model-facing equivalent:
   "event_filter": {
     "eventTypes": [
       "kanban.task.blocked",
+      "kanban.task.unblocked",
       "kanban.task.completed",
       "kanban.task.crashed",
       "kanban.task.gave_up",
@@ -234,6 +235,8 @@ Model-facing equivalent:
 The command/tool response contains a `bindingId`, source ref, producer id, filter, status, and compatibility verdict. It must not contain the listener secret, `secret.txt` contents, task bodies, raw comments, or raw logs. If compatibility fails, fix the listener producer/event allowlist or source ref; do not work around it by broadening the event payload.
 
 Before enabling a runner, preview the durable `task_events` cursor with `/ath dry-run-binding <binding_id> --db /path/to/kanban.db --since <event_id> --json` or the model-facing `ath_dry_run_source_binding` tool. Dry-run reports `would_emit`, `suppressed`, `would_coalesce`, and `invalid_binding`, does not POST signed events, and does not advance the binding cursor. The transform uses `eventId=<board>:<task_id>:<task_event_id>`, `seriesKey=kanban:<board>:<task_id>`, and `workflowId=kanban:<board>:<task_id>`; it omits task bodies, raw comments, transcripts, logs, and secret-shaped fields.
+
+Use `kanban.task.unblocked` for native blocked-resolved wakeups instead of maintaining bespoke blocked/resolved pollers.
 
 Trace one emitted event with `/ath trace <event_id> --json` or `ath_trace_event`. For Kanban, the event id is deterministic, for example `ath:t_4361a7a9:12345`. Use `/ath inspect-binding <binding_id>` or `ath_get_source_binding` for cursor, compatibility, lag, and outbox status. Do not paste board comment text or logs back into the trace prompt; trace output is diagnostics, not an instruction channel.
 

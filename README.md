@@ -86,25 +86,27 @@ Source bindings connect an upstream event stream to an existing listener. Kanban
 Natural-language path from the conversation that owns the listener:
 
 ```text
-bind Kanban board ath to async-thread listener ath_mg3BQeDs15Gm4DnF for blocked, completed, crashed, gave_up, timed_out, and ready_for_review task transitions; show a dry-run before enabling the runner
+bind Kanban board ath to async-thread listener ath_mg3BQeDs15Gm4DnF for blocked, unblocked, completed, crashed, gave_up, timed_out, and ready_for_review task transitions; show a dry-run before enabling the runner
 ```
 
 Expected model-facing tool path:
 
-1. call `ath_create_source_binding` with `source: "kanban"`, `board_ref: "ath"`, `listener_thread_key: "ath_mg3BQeDs15Gm4DnF"`, `producer_id: "ath-kanban-bridge"`, and an `event_filter` allowlist for `kanban.task.blocked`, `kanban.task.completed`, `kanban.task.crashed`, `kanban.task.gave_up`, `kanban.task.timed_out`, and `kanban.task.ready_for_review`;
+1. call `ath_create_source_binding` with `source: "kanban"`, `board_ref: "ath"`, `listener_thread_key: "ath_mg3BQeDs15Gm4DnF"`, `producer_id: "ath-kanban-bridge"`, and an `event_filter` allowlist for `kanban.task.blocked`, `kanban.task.unblocked`, `kanban.task.completed`, `kanban.task.crashed`, `kanban.task.gave_up`, `kanban.task.timed_out`, and `kanban.task.ready_for_review`;
 2. call `ath_dry_run_source_binding` with the binding id and board DB path to preview `would_emit`, `suppressed`, `would_coalesce`, `invalid_binding`, and the cursor that would advance;
 3. inspect with `ath_get_source_binding` and trace individual emissions with `ath_trace_event` once the runner is enabled.
 
 Manual admin/debug equivalent:
 
 ```text
-/ath bind-source kanban ath_mg3BQeDs15Gm4DnF --board ath --producer ath-kanban-bridge --events kanban.task.blocked,kanban.task.completed,kanban.task.crashed,kanban.task.gave_up,kanban.task.timed_out,kanban.task.ready_for_review
+/ath bind-source kanban ath_mg3BQeDs15Gm4DnF --board ath --producer ath-kanban-bridge --events kanban.task.blocked,kanban.task.unblocked,kanban.task.completed,kanban.task.crashed,kanban.task.gave_up,kanban.task.timed_out,kanban.task.ready_for_review
 /ath dry-run-binding <binding_id> --db /absolute/path/to/kanban.db --json
 /ath inspect-binding <binding_id>
 /ath trace <event_id> --json
 ```
 
 The binding command returns a binding id and compatibility status only; it does not print or expose the listener HMAC secret. Dry-run never sends events and never advances the cursor. The runner is enabled separately in `platforms.async_threads.extra.source_binding_runner_enabled`; it is not a Hermes cron job.
+
+`kanban.task.unblocked` is the native blocked-resolved event for Kanban source bindings and replaces bespoke blocked/resolved watchers.
 
 Minimal event envelope, matching the [`async-thread-event/v1` contract](docs/EVENT_CONTRACT.md):
 

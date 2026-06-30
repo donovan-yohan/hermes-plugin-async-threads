@@ -235,13 +235,13 @@ def test_source_binding_compatibility_resolves_kanban_event_kinds_to_event_types
         source="kanban",
         source_ref={"board": "default"},
         listener_thread_key=listener.thread_key,
-        event_filter={"eventKinds": ["completed", "review-required"]},
+        event_filter={"eventKinds": ["completed", "review-required", "unblocked"]},
     )
 
     compatibility = reg.source_binding_compatibility(binding)
 
     assert compatibility["reason"] == "disallowed_event_types"
-    assert compatibility["missingEventTypes"] == ["kanban.task.ready_for_review"]
+    assert compatibility["missingEventTypes"] == ["kanban.task.ready_for_review", "kanban.task.unblocked"]
     assert compatibility["valid"] is False
     assert compatibility["failClosed"] is True
 
