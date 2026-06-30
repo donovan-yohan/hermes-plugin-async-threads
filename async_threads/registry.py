@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -1302,6 +1303,29 @@ class AsyncThreadRegistry:
                 stale.append((handle, event))
         return stale
 
+
+
+class AsyncThreadRegistryAsync:
+    """Async facade for AsyncThreadRegistry used by gateway event-loop paths.
+
+    The registry remains synchronous sqlite3 underneath. This wrapper mirrors
+    upstream Hermes AsyncSessionDB: callable registry methods run in a worker
+    thread so SQLite lock waits do not freeze the async_threads aiohttp/gateway
+    event loop.
+    """
+
+    def __init__(self, registry: AsyncThreadRegistry) -> None:
+        self._registry = registry
+
+    def __getattr__(self, name: str):
+        attr = getattr(self._registry, name)
+        if not callable(attr):
+            return attr
+
+        async def _offloaded(*args, **kwargs):
+            return await asyncio.to_thread(attr, *args, **kwargs)
+
+        return _offloaded
 
 def _row_to_handle(row: sqlite3.Row) -> AsyncThreadHandle:
     return AsyncThreadHandle(

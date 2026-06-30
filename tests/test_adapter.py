@@ -1,8 +1,10 @@
+import ast
 import asyncio
 import hashlib
 import hmac
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +29,29 @@ def register_async_threads_platform():
             )
         )
     yield
+
+
+def test_adapter_has_no_direct_sync_registry_calls_on_event_loop():
+    source = Path(__file__).resolve().parents[1] / "async_threads" / "adapter.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    violations = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Attribute)
+            and isinstance(func.value.value, ast.Name)
+            and func.value.value.id == "self"
+            and func.value.attr == "_registry"
+        ):
+            violations.append(f"adapter.py:{node.lineno} self._registry.{func.attr}(")
+    assert not violations, (
+        "Blocking registry calls must go through AsyncThreadRegistryAsync "
+        "or an explicit asyncio.to_thread boundary:\n  " + "\n  ".join(violations)
+    )
+
 
 
 class FakeTargetAdapter:
@@ -746,6 +771,29 @@ async def test_duplicate_timeout_event_is_idempotent(tmp_path):
     assert len(target.sent) == 1
     events = registry.list_recent_events(thread_key=handle.thread_key, limit=2)
     assert [event.outcome for event in events] == ["duplicate", "direct_delivered"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_duplicate_event_only_dispatches_once(tmp_path):
+    config = PlatformConfig(enabled=True, extra={"registry_path": str(tmp_path / "ath.sqlite3")})
+    adapter = AsyncThreadsAdapter(config)
+    registry = AsyncThreadRegistry(tmp_path / "ath.sqlite3")
+    source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type="channel", thread_id="t1", user_id="u1")
+    handle = registry.create_handle(source=source.to_dict(), producer_id="relay", policy="direct")
+    target = FakeTargetAdapter()
+    adapter.gateway_runner = SimpleNamespace(adapters={Platform.DISCORD: target})
+    body = _event_body(handle, event_id="evt-concurrent-duplicate", event_type="relay.done", summary="done")
+
+    responses = await asyncio.gather(
+        adapter._handle_event(FakeRequest(body, handle.secret)),
+        adapter._handle_event(FakeRequest(body, handle.secret)),
+    )
+
+    payloads = [json.loads(response.text)["status"] for response in responses]
+    assert sorted(payloads) == ["delivered", "duplicate"]
+    assert len(target.sent) == 1
+    outcomes = sorted(event.outcome for event in registry.list_recent_events(thread_key=handle.thread_key, limit=5))
+    assert outcomes == ["direct_delivered", "duplicate"]
 
 
 def test_loop_rendering_compacts_raw_logs_unless_debug_tail_mode():
